@@ -1,0 +1,18 @@
+{
+  "name": "qtc-observatory",
+  "displayName": "QTC Observatory（跨Agent任务监测与性价比研究台）",
+  "description": "100% 零干扰旁路监测本地所有 AI Agent（Antigravity / DSH / Claude Code / Codex / 自定义 Agent）的完成质量(Q)、时间成本(T)与金钱额度(C)；内置实时 OLS 回归实验室、“捡芝麻丢西瓜”不合算行为抓捕器及极致性价比/极致质量双模式工作法推算引擎。",
+  "version": "1.0.0",
+  "license": "MIT",
+  "repository": "https://github.com/tcbhls/qtc-observatory",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "tcbhls",
+    "url": "https://github.com/tcbhls"
+  },
+  "suggestedPrompts": [
+    "打开 QTC 跨Agent任务监测与性价比研究台",
+    "同步全机所有 AI Agent 最新会话样本并查看回归报告",
+    "检查最近哪些任务出现了大金钱换小时间的捡芝麻丢西瓜行为"
+  ]
+}

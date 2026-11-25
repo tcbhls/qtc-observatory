@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QTC 跨Agent任务监测与性价比研究台</title>
+  <style>/*__INLINE_CSS__*/</style>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="badge-zero">● 零干扰只读旁路监测 (0 Prompt注入)</span>
+        <h1>QTC 跨Agent研究观测台</h1>
+      </div>
+      <div class="toolbar">
+        <select id="platformFilter" title="按 AI Agent 平台筛选样本">
+          <option value="all">全部 AI Agent 平台</option>
+          <option value="antigravity">Google Antigravity</option>
+          <option value="dsh">DeepSeek Harness (DSH)</option>
+          <option value="claude-code">Claude Code</option>
+          <option value="codex">OpenAI Codex</option>
+          <option value="custom">Custom Drop-in</option>
+        </select>
+        <button id="btnSync" class="btn primary">立即增量同步</button>
+        <button id="btnExport" class="btn">导出 CSV 样本库</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="overview">1. 跨Agent样本与账单拆解</button>
+      <button class="tab" data-tab="regression">2. 真实散点OLS回归实验室</button>
+      <button class="tab" data-tab="sesame">3. “捡芝麻丢西瓜”抓捕榜 <span id="alertCountPill" class="pill-danger">0</span></button>
+      <button class="tab" data-tab="prescribe">4. 极致性价比 vs 极致质量推算</button>
+      <button class="tab" data-tab="samples">5. 样本明细与人工质量校准</button>
+    </nav>
+
+    <div id="statusBanner" class="status-banner hidden"></div>
+
+    <main class="content">
+      <!-- TAB 1: 全局总览 -->
+      <section id="tab-overview" class="panel active">
+        <div id="kpiGrid" class="kpi-grid"></div>
+
+        <div class="two-col">
+          <div class="box">
+            <h3>金钱/额度真实去向拆解 (为什么 80%+ 花在喂上下文？)</h3>
+            <div id="costStackBar" class="stack-wrap"></div>
+          </div>
+          <div class="box">
+            <h3>挂钟执行时间真实去向拆解 (等待 vs 思考 vs 工具)</h3>
+            <div id="timeStackBar" class="stack-wrap"></div>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>本机各 AI Agent 平台真实样本横向对比矩阵</h3>
+          <div class="table-scroll">
+            <table class="data-table" id="platformTable">
+              <thead>
+                <tr>
+                  <th>AI Agent 平台</th>
+                  <th>收录总会话 (主+子)</th>
+                  <th>累计交互轮数</th>
+                  <th>输入 (M)</th>
+                  <th>缓存重读 (M)</th>
+                  <th>输出 (M)</th>
+                  <th>客观质量均分 Q</th>
+                  <th>累计执行时长</th>
+                  <th>累计加权额度 (U)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: 回归实验室 -->
+      <section id="tab-regression" class="panel">
+        <div class="box">
+          <div class="reg-header">
+            <div>
+              <h3 id="regTitle">真实样本最小二乘 (OLS) 回归分析</h3>
+              <p id="regFormula" class="formula-bar"></p>
+            </div>
+            <div class="reg-selector">
+              <button class="btn sm active" data-reg="power">① ln(C) vs ln(N) 轮数幂律膨胀</button>
+              <button class="btn sm" data-reg="linear">② C vs (μ·N·L) 纯线性计费吞吐</button>
+              <button class="btn sm" data-reg="quality">③ Q vs ln(N) 拖长失忆降质定律</button>
+              <button class="btn sm" data-reg="pareto">④ 单位产出 ln(C/W) vs ln(T/W) 帕累托前沿</button>
+            </div>
+          </div>
+          <div class="chart-stage">
+            <svg id="regSvg" viewBox="0 0 860 400" preserveAspectRatio="xMidYMid meet"></svg>
+            <div id="chartTooltip" class="chart-tooltip hidden"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: 捡芝麻丢西瓜抓捕榜 -->
+      <section id="tab-sesame" class="panel">
+        <div class="box">
+          <h3>“捡芝麻丢西瓜”与“双输雪崩”不合算行为实证抓捕雷达</h3>
+          <p class="sub-note">判定准则：相对同领域基准，多付出的金钱成本比例远大于换回的省时比例（不对称比 AER = ΔC% / (-ΔT%) &gt; 1.5），或多烧了大把额度但总耗时反而更慢（双输雪崩）。</p>
+          <div class="table-scroll">
+            <table class="data-table" id="sesameTable">
+              <thead>
+                <tr>
+                  <th>平台 / 会话ID</th>
+                  <th>任务领域与摘要</th>
+                  <th>不合算类型</th>
+                  <th>超支比例 vs 省时比例</th>
+                  <th>实际 C / T / Q</th>
+                  <th>可避免浪费额</th>
+                  <th>具体漏钱病灶拆解</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: 双模式推算与策略沙盘 -->
+      <section id="tab-prescribe" class="panel">
+        <div id="constStrip" class="const-strip"></div>
+        <div class="two-col">
+          <div id="modeCeBox" class="box border-emerald"></div>
+          <div id="modeQualBox" class="box border-sky"></div>
+        </div>
+
+        <div class="box">
+          <h3>交互式策略预演计算器 (What-If 事前防亏沙盘)</h3>
+          <p class="sub-note">在派发大任务前拨动下方参数，基于当前样本库回归系数实时预测 (Q, T, C) 与是否会触发“捡芝麻丢西瓜”告警：</p>
+          <div class="sim-grid">
+            <label>预计基准轮数 N: <strong id="lblSimTurns">60</strong>
+              <input type="range" id="simTurns" min="8" max="400" value="60" />
+            </label>
+            <label>主模型档位费率: <strong id="lblSimModel">1.0x (均衡High)</strong>
+              <select id="simModel">
+                <option value="2.0">2.0x (顶配 Neon-XHigh / Opus)</option>
+                <option value="1.35">1.35x (旗舰 Sonnet / GPT-High)</option>
+                <option value="1.0" selected>1.0x (均衡 Carbon-High / R1)</option>
+                <option value="0.65">0.65x (DSH 标准档)</option>
+                <option value="0.28">0.28x (轻量 Hydrogen / Flash)</option>
+              </select>
+            </label>
+            <label>单轮并行工具数: <strong id="lblSimTools">3.0</strong>
+              <input type="range" id="simTools" min="1" max="8" step="0.5" value="3.0" />
+            </label>
+            <label>平均上下文水位 (k): <strong id="lblSimCtx">65k</strong>
+              <input type="range" id="simCtx" min="20" max="220" step="5" value="65" />
+            </label>
+            <label>并发子代理数量: <strong id="lblSimSubs">0</strong>
+              <input type="range" id="simSubs" min="0" max="15" step="1" value="0" />
+            </label>
+            <label>子代理模型与复读模式:
+              <select id="simSubMode">
+                <option value="0.28|0">轻量 Flash (0.28x) + 只回摘要不重读原文</option>
+                <option value="2.0|1">顶配 Inherit (2.0x) + 主会话重复读原图/原文</option>
+              </select>
+            </label>
+          </div>
+          <div id="simResultBar" class="sim-result"></div>
+        </div>
+      </section>
+
+      <!-- TAB 5: 样本明细与人工打分 -->
+      <section id="tab-samples" class="panel">
+        <div class="box">
+          <div class="filter-row">
+            <h3>全机多 AI Agent 项目样本库 (可直接输入真实质量分校准回归模型)</h3>
+            <input type="text" id="searchBox" placeholder="搜索任务关键词、模型或会话ID..." />
+          </div>
+          <div class="table-scroll">
+            <table class="data-table" id="projectsTable">
+              <thead>
+                <tr>
+                  <th>平台 / ID</th>
+                  <th>任务摘要</th>
+                  <th>主力模型</th>
+                  <th>轮数(主+子)</th>
+                  <th>失忆</th>
+                  <th>耗时 T</th>
+                  <th>额度 C</th>
+                  <th>性价比 CE</th>
+                  <th>质量分 Q (可手改保存)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>/*__INLINE_JS__*/</script>
+</body>
+</html>
