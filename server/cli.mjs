@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * QTC Observatory v1.1.0 — 独立命令行与全天候无头守护进程管理入口
+ * QTC Observatory v1.2.0 — 独立命令行与全天候无头守护进程管理入口
  */
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,18 +23,16 @@ if (cmd === 'sync' || cmd === 'report') {
   const dash = computeObservatoryAnalytics(db, 'all');
 
   console.log('========================================================================');
-  console.log(' QTC 跨Agent实时监测与自修正回归台 v1.1.0 — 全机真实样本计量快照');
+  console.log(' QTC 跨Agent实时监测与因果对照研究台 v1.2.0 — 耗用率守恒与完成质量快照');
   console.log('========================================================================');
   console.log(`[增量采集] 扫描文件: ${syncRes.scanned_files} | 新增/更新会话: ${syncRes.updated_sessions} | 未变跳过: ${syncRes.skipped_unchanged} | 耗时: ${syncRes.elapsed_ms}ms`);
   console.log(`[总样本池] 总收录会话: ${dash.kpis.total_sessions} 个 (根任务项目: ${dash.kpis.root_projects}, 子代理: ${dash.kpis.subagent_sessions}) | 总轮数: ${dash.kpis.total_turns}`);
-  console.log(`[活跃脉搏] 过去15分钟正在活跃跳动的实时会话数: ${dash.live_active_sessions.length} 个`);
-  console.log(`[全局账单] 总Token: ${dash.kpis.total_tokens_M}M | 总额度: ${dash.kpis.total_weighted_cost_u}U (缓存重读占 ${dash.kpis.cost_shares_pct.cache_read}%, 输入占 ${dash.kpis.cost_shares_pct.fresh_input}%, 输出占 ${dash.kpis.cost_shares_pct.output}%)`);
-  console.log(`[全局耗时] 总时长: ${dash.kpis.total_exec_hours} 小时 (后台等待 ${dash.kpis.time_shares_pct.async_wait}%, LLM推理 ${dash.kpis.time_shares_pct.llm_think}%, 同步工具 ${dash.kpis.time_shares_pct.sync_tool}%)`);
+  console.log(`[受控对照] 已构建有效因果对照实验对: ${dash.kpis.paired_experiment_count} 组 | 其中不合算/质量失守: ${dash.kpis.sesame_alert_count} 组 (超额损耗 ${dash.kpis.total_estimated_waste_u}U)`);
 
-  console.log('\n--- 1. 跨 AI Agent 平台样本分布 ---');
+  console.log('\n--- 1. 跨 AI Agent 平台样本与任务完成质量分布 ---');
   for (const p of dash.platform_summary) {
     console.log(
-      `  • ${p.platform.padEnd(14)} | 会话=${String(p.total_sessions).padStart(4)} (主${String(p.root_sessions).padStart(3)}+子${String(p.sub_sessions).padStart(3)}) | 轮数=${String(p.total_turns).padStart(5)} | 质量均分=${String(p.avg_q).padStart(5)} | 耗时=${String(p.exec_hours).padStart(6)}h | 额度=${String(p.weighted_cost_u).padStart(7)}U`
+      `  • ${p.platform.padEnd(14)} | 会话=${String(p.total_sessions).padStart(4)} (主${String(p.root_sessions).padStart(3)}+子${String(p.sub_sessions).padStart(3)}) | 完成质量均分=${String(p.avg_q).padStart(5)} | 平均耗用率=${String(p.avg_burn_uh).padStart(6)} U/h | 总额度=${String(p.weighted_cost_u).padStart(7)}U`
     );
   }
 
@@ -43,18 +41,21 @@ if (cmd === 'sync' || cmd === 'report') {
   const r3 = dash.regressions.quality_vs_turns;
   const r4 = dash.regressions.turn_latency_vs_out;
   const ec = dash.prescriptions.empirical_constants;
-  console.log('\n--- 2. 在线实时自修正数学模型 (OLS + Multiple OLS + Online IRLS Logistic) ---');
-  console.log(`  [① 幂律膨胀] ln(C_raw) = ${r1.intercept} + ${r1.slope} * ln(N)  (n=${r1.n}, R²=${r1.r2}, p=${r1.pValue}) -> 轮数翻倍成本×${(2 ** r1.slope).toFixed(2)}`);
-  console.log(`  [② 线性吞吐] C_weight  = ${r2.intercept} + ${r2.slope} * (μ·N·L_M) (n=${r2.n}, R²=${r2.r2}, p=${r2.pValue})`);
-  console.log(`  [③ 质量退化] Q_final   = ${r3.intercept} + (${r3.slope}) * ln(N_tree) (n=${r3.n}, R²=${r3.r2}, p=${r3.pValue})`);
+  console.log('\n--- 2. 在线实时自修正数学模型 ---');
+  console.log(`  [① 幂律膨胀] ln(C_raw) = ${r1.intercept} + ${r1.slope} * ln(N)  (n=${r1.n}, R²=${r1.r2}) -> 轮数翻倍成本×${(2 ** r1.slope).toFixed(2)}`);
+  console.log(`  [② 线性吞吐] C_weight  = ${r2.intercept} + ${r2.slope} * (μ·N·L_M) (n=${r2.n}, R²=${r2.r2})`);
+  console.log(`  [③ 完成质量] Q_task    = ${r3.intercept} + (${r3.slope}) * ln(N_tree) (n=${r3.n}, R²=${r3.r2})`);
   console.log(`  [④ 单步延迟] t_LLM     = ${r4.mult_beta[0]} + ${r4.mult_beta[1]}*Out_k + ${r4.mult_beta[2]}*Ctx_100k (n=${r4.n}步, R²=${r4.mult_r2})`);
-  console.log(`  [⑤ 在线IRLS] P_live 权重=[${ec.logit_live_weights.join(', ')}] (Acc=${ec.logit_live_accuracy}%) -> 动态50%生死线 N_50% = ${ec.dynamic_n_crit_50} 轮`);
-  console.log(`  [⑥ 弹性边界] P_state 权重=[${ec.logit_state_weights.join(', ')}] -> 动态时间:金钱弹性比 = ${ec.time_cost_elasticity_ratio} : 1`);
+  console.log(`  [⑤ 耗用功率] C_dot(U/h)= ${ec.burn_formula_beta[0]} + ${ec.burn_formula_beta[1]}*μ + ${ec.burn_formula_beta[2]}*Ctx_100k + ${ec.burn_formula_beta[3]}*Sub/h (R²=${ec.burn_formula_r2})`);
 
-  console.log(`\n--- 3. 抓获“捡芝麻丢西瓜 / 双输不合算”异常项目: 共 ${dash.sesame_alerts.length} 个 (累计可避免浪费 ${dash.kpis.total_estimated_waste_u}U) ---`);
-  for (const a of dash.sesame_alerts.slice(0, 6)) {
+  console.log(`\n--- 3. 受控因果对照实验榜 (明确【实验组 A】对比【基线 B】：质量 ΔQ / 省时率 / 耗用率增幅 / 成本变化) ---`);
+  for (const cp of dash.counterfactual_pairs.slice(0, 10)) {
+    const d = cp.deltas;
     console.log(
-      `  [${a.platform}] ${a.session_uid.slice(0, 16)} | ${a.type} | 超支+${a.cost_increase_pct}% vs 省时${a.time_saved_pct}% | C=${a.C_units}U, T=${a.T_min}m, Q=${a.Q_final} | 浪费≈${a.estimated_waste_u}U`
+      `  [${cp.comparison_scope}] ${cp.base.uid.slice(0, 14)}\n` +
+      `     基线B: T=${cp.base.T_min}m, C=${cp.base.C_u}U, 耗用率=${cp.base.burn_uh}U/h, Q_task=${cp.base.Q_task}\n` +
+      `     实验A: T=${cp.target.T_min}m, C=${cp.target.C_u}U, 耗用率=${cp.target.burn_uh}U/h, Q_task=${cp.target.Q_task}\n` +
+      `     差分结论: ${cp.verdict_label} | 质量 ΔQ=${d.delta_Q >= 0 ? '+' : ''}${d.delta_Q} | 省时=${d.time_saved_pct}% | 耗用率=${d.burn_surge_pct >= 0 ? '+' : ''}${d.burn_surge_pct}% (零溢价上限+${d.neutral_burn_limit_pct}%) | 单位成本=${d.cost_surge_pct >= 0 ? '+' : ''}${d.cost_surge_pct}%`
     );
   }
 } else if (cmd === 'export') {
@@ -68,12 +69,11 @@ if (cmd === 'sync' || cmd === 'report') {
   const port = 18765;
   startLocalWebMirror(port, true);
   const url = `http://127.0.0.1:${port}`;
-  console.log(`QTC 跨Agent实时流观测大屏已启动: ${url} (fs.watch 秒级监听 + SSE 无感热推中，按 Ctrl+C 停止)`);
+  console.log(`QTC 跨Agent实时流观测大屏已启动: ${url}`);
   if (!process.argv.includes('--no-open')) {
     spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref();
   }
 } else if (cmd === 'daemon') {
-  // 独立静默后台守护进程（脱离任何 IDE 持续实时监控全机所有 AI Agent）
   const child = spawn(process.execPath, [INDEX_SCRIPT, '--no-mcp', '--daemon'], {
     detached: true,
     stdio: 'ignore',

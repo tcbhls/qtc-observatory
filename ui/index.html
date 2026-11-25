@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>QTC 跨Agent实时任务监测与自修正研究台 v1.1</title>
+  <title>QTC 跨Agent实时任务监测与因果对照研究台 v1.2</title>
   <style>/*__INLINE_CSS__*/</style>
 </head>
 <body>
@@ -12,7 +12,7 @@
       <div class="brand">
         <span class="badge-zero">● 零干扰只读旁路 (0 Prompt注入)</span>
         <span id="liveStreamBadge" class="badge-live">⚡ 正在连接实时流...</span>
-        <h1>QTC 跨Agent实时研究观测台 <small style="font-size:11px;color:#94a3b8;font-weight:500">v1.1 Online-IRLS</small></h1>
+        <h1>QTC 跨Agent实时研究观测台 <small style="font-size:11px;color:#94a3b8;font-weight:500">v1.2 因果差分与耗用率守恒版</small></h1>
       </div>
       <div class="toolbar">
         <select id="platformFilter" title="按 AI Agent 平台筛选样本">
@@ -28,15 +28,14 @@
       </div>
     </header>
 
-    <!-- 实时活跃会话跳动脉搏栏 -->
     <div id="livePulseStrip" class="live-pulse-strip"></div>
 
     <nav class="tabs">
       <button class="tab active" data-tab="overview">1. 跨Agent样本与账单拆解</button>
-      <button class="tab" data-tab="regression">2. 6大实时回归与模型自修正实验室</button>
-      <button class="tab" data-tab="sesame">3. “捡芝麻丢西瓜”抓捕榜 <span id="alertCountPill" class="pill-danger">0</span></button>
-      <button class="tab" data-tab="prescribe">4. 极致性价比 vs 极致质量动态推算</button>
-      <button class="tab" data-tab="samples">5. 样本明细与人工质量校准</button>
+      <button class="tab" data-tab="regression">2. 6大实时回归与耗用率相图</button>
+      <button class="tab" data-tab="sesame">3. 策略优化前后对照 &amp; 耗用率审计 <span id="alertCountPill" class="pill-danger">0</span></button>
+      <button class="tab" data-tab="prescribe">4. 极致性价比 vs 极致完成质量推算</button>
+      <button class="tab" data-tab="samples">5. 样本明细与任务完成质量校准</button>
     </nav>
 
     <div id="statusBanner" class="status-banner hidden"></div>
@@ -69,9 +68,9 @@
                   <th>输入 (M)</th>
                   <th>缓存重读 (M)</th>
                   <th>输出 (M)</th>
-                  <th>客观质量均分 Q</th>
-                  <th>累计执行时长</th>
-                  <th>累计加权额度 (U)</th>
+                  <th>任务完成质量均分 Q_task</th>
+                  <th>平均额度耗用率</th>
+                  <th>累计执行时长 / 总额度</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -80,12 +79,12 @@
         </div>
       </section>
 
-      <!-- TAB 2: 6大实时回归与在线自修正实验室 -->
+      <!-- TAB 2: 6大实时回归与耗用率相图实验室 -->
       <section id="tab-regression" class="panel">
         <div class="box">
           <div class="reg-header">
             <div>
-              <h3 id="regTitle">真实样本在线最小二乘 (OLS) 与极大似然 (IRLS) 实时回归</h3>
+              <h3 id="regTitle">真实样本在线最小二乘 (OLS) 与功率-速度因果相图</h3>
               <p id="regFormula" class="formula-bar"></p>
             </div>
             <div class="chart-export-group">
@@ -94,12 +93,12 @@
             </div>
           </div>
           <div class="reg-selector" style="margin-bottom:10px">
-            <button class="btn sm active" data-reg="power">① ln(C) vs ln(N) 轮数幂律膨胀</button>
-            <button class="btn sm" data-reg="linear">② C vs (μ·N·L) 纯线性计费吞吐</button>
-            <button class="btn sm" data-reg="quality">③ Q vs ln(N) 拖长失忆降质</button>
-            <button class="btn sm" data-reg="latency">④ t_LLM vs Out_k 单步延迟多元回归</button>
-            <button class="btn sm" data-reg="sigmoid">⑤ P_CE(N) 在线IRLS概率生死线</button>
-            <button class="btn sm" data-reg="pareto">⑥ 帕累托空间 + 实时Logistic分界线</button>
+            <button class="btn sm active" data-reg="phase">① 省时率 vs 额度耗用率增幅 因果相图</button>
+            <button class="btn sm" data-reg="power">② ln(C) vs ln(N) 轮数幂律膨胀</button>
+            <button class="btn sm" data-reg="linear">③ C vs (μ·N·L) 纯线性计费吞吐</button>
+            <button class="btn sm" data-reg="quality">④ 任务完成质量 Q_task vs ln(N)</button>
+            <button class="btn sm" data-reg="latency">⑤ t_LLM vs Out_k 单步延迟多元回归</button>
+            <button class="btn sm" data-reg="sigmoid">⑥ P_CE(N) 在线IRLS概率生死线</button>
           </div>
           <div class="chart-stage">
             <svg id="regSvg" viewBox="0 0 880 410" preserveAspectRatio="xMidYMid meet"></svg>
@@ -109,8 +108,7 @@
 
         <div class="box">
           <h3>📈 数学模型在线自我修正演化记录 (随每一轮新样本入库自动重训练快照)</h3>
-          <p class="sub-note">每当任意 AI Agent 新增会话轮次或人工校准质量得分，引擎立即在线重解 OLS 矩阵与 Newton-Raphson IRLS 方程组，实时更新斜率、弹性比与 50% 概率生死线：</p>
-          <div class="table-scroll" style="max-height:240px">
+          <div class="table-scroll" style="max-height:230px">
             <table class="data-table" id="evolutionTable">
               <thead>
                 <tr>
@@ -119,9 +117,8 @@
                   <th>累计轮数 ∑N</th>
                   <th>幂律指数 β_power</th>
                   <th>线性吞吐率 k_lin</th>
-                  <th>质量衰减斜率 β_Q</th>
+                  <th>完成质量斜率 β_Q</th>
                   <th>动态50%生死线 N_50%</th>
-                  <th>时间:金钱弹性比</th>
                   <th>IRLS分类准确率</th>
                 </tr>
               </thead>
@@ -131,22 +128,49 @@
         </div>
       </section>
 
-      <!-- TAB 3: 捡芝麻丢西瓜抓捕榜 -->
+      <!-- TAB 3: 受控因果对照实验台 (明确谁和谁比 + 质量对比 + 耗用率对比) -->
       <section id="tab-sesame" class="panel">
+        <!-- 交互式任意 A vs B 受控配对验算器 -->
+        <div class="box border-sky">
+          <h3>⚖️ 交互式「基线 B vs 实验组 A」受控配对验算器 (想拿哪两个任务或阶段比，由你精准指定)</h3>
+          <p class="sub-note">数学守恒定律：<code>单位成本比 c_A/c_B = (1 + 耗用率增幅 ΔC_dot%) × (1 - 省时率 s_T%)</code>。在默认要求<strong>任务完成质量保持 (ΔQ ≥ -3)</strong> 的前提下，一旦耗用率增幅远超零溢价边界 <code>s_T/(1 - s_T)</code>，即触发“时间没省多少，额度耗用率反而剧增”！</p>
+          <div class="sim-grid" style="grid-template-columns: 2fr 2fr 1fr">
+            <label>选择【对照基线 B (优化前阶段 / 原方案会话)】：
+              <select id="cmpBaseSelect"></select>
+            </label>
+            <label>选择【实验组 A (优化后阶段 / 新方案会话)】：
+              <select id="cmpTargetSelect"></select>
+            </label>
+            <label>实验A相对基线B的交付体量比 (M_A / M_B)：
+              <input type="number" id="cmpScaleInput" value="1.0" min="0.1" max="20" step="0.1" title="例如基线B完成了37.5页、实验A完成了22.5页，可填 0.60 以精确计算每页单价与单页速度！" />
+            </label>
+          </div>
+          <div id="cmpCustomResult" class="sim-result"></div>
+        </div>
+
         <div class="box">
-          <h3>“捡芝麻丢西瓜”与“双输雪崩”不合算行为实证抓捕雷达</h3>
-          <p class="sub-note">判定准则：相对同领域基准，多付出的金钱成本比例远大于换回的省时比例（不对称比 AER = ΔC% / (-ΔT%) &gt; 1.5），或多烧了大把额度但总耗时反而更慢（双输雪崩）。</p>
+          <div class="filter-row">
+            <div>
+              <h3>🔍 自动识别的受控因果对照实验榜 (彻底剔除无基线瞎比，每行明确标注【谁和谁比】)</h3>
+              <p class="sub-note" style="margin-bottom:0">仅收录：① <strong>同一任务中途注入加速/新方案前后自对照</strong>；② <strong>同一工程目录跨会话迭代对照</strong>；③ <strong>长会话(>85轮)前期清爽基线 vs 后期上下文膨胀耗用率对照</strong>。孤立测试与咨询会话已自动剥离。</p>
+            </div>
+            <select id="pairCategoryFilter">
+              <option value="all">全部受控对照实验</option>
+              <option value="replacement">① 同任务提速/换方案前后自对照</option>
+              <option value="cross_project">② 同一工程目录跨会话迭代对照</option>
+              <option value="bloat_drift">③ 长会话前期vs后期耗用率膨胀</option>
+            </select>
+          </div>
           <div class="table-scroll">
             <table class="data-table" id="sesameTable">
               <thead>
                 <tr>
-                  <th>平台 / 会话ID</th>
-                  <th>任务领域与摘要</th>
-                  <th>不合算类型</th>
-                  <th>超支比例 vs 省时比例</th>
-                  <th>实际 C / T / Q</th>
-                  <th>可避免浪费额</th>
-                  <th>具体漏钱病灶拆解</th>
+                  <th>对照范围 &amp; 【基线 B → 实验 A】</th>
+                  <th>任务完成质量对比 (Q_B → Q_A)</th>
+                  <th>耗时 / 真实提速对比</th>
+                  <th>额度耗用率 (U/h) &amp; 成本变化</th>
+                  <th>因果定性 &amp; 超额耗费</th>
+                  <th>物理病灶与根因拆解</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -164,10 +188,10 @@
         </div>
 
         <div class="box">
-          <h3>交互式策略预演计算器 (100% 驱动于最新在线重训练参数，零硬编码常数)</h3>
-          <p class="sub-note">拨动下方参数，基于当前数据库刚刚在线拟合出的 OLS 吞吐斜率、多元延迟参数与 IRLS Logistic 权重实时推演 (Q, T, C, P_CE)：</p>
+          <h3>交互式加速方案防坑沙盘 (相对「同任务标准均衡基线 B」实时推演 ΔQ / 省时率 / 耗用率增幅)</h3>
+          <p class="sub-note">在给正在运行的任务上“加速方案 / 子代理并发”前先拨动滑块：看看你的方案是真正省时省钱，还是由于阿姆达尔串行瓶颈导致“省时微弱但额度耗用率翻倍剧增”：</p>
           <div class="sim-grid">
-            <label>预计基准轮数 N: <strong id="lblSimTurns">60</strong>
+            <label>同任务基准轮数 N: <strong id="lblSimTurns">60</strong>
               <input type="range" id="simTurns" min="8" max="400" value="60" />
             </label>
             <label>主模型档位费率: <strong id="lblSimModel">1.0x (均衡High)</strong>
@@ -186,7 +210,7 @@
               <input type="range" id="simCtx" min="20" max="220" step="5" value="65" />
             </label>
             <label>并发子代理数量: <strong id="lblSimSubs">0</strong>
-              <input type="range" id="simSubs" min="0" max="15" step="1" value="0" />
+              <input type="range" id="simSubs" min="0" max="30" step="1" value="0" />
             </label>
             <label>子代理模型与复读模式:
               <select id="simSubMode">
@@ -203,22 +227,21 @@
       <section id="tab-samples" class="panel">
         <div class="box">
           <div class="filter-row">
-            <h3>全机多 AI Agent 项目样本库 (修改真实质量分将立即触发 IRLS 与 OLS 全模型重训)</h3>
-            <input type="text" id="searchBox" placeholder="搜索任务关键词、模型或会话ID..." />
+            <h3>全机多 AI Agent 会话样本库 (Q_task 代表真正的任务完成质量；你可随时手改校准真值)</h3>
+            <input type="text" id="searchBox" placeholder="搜索任务关键词、工程目录、模型或会话ID..." />
           </div>
           <div class="table-scroll">
             <table class="data-table" id="projectsTable">
               <thead>
                 <tr>
-                  <th>平台 / ID</th>
-                  <th>任务摘要</th>
+                  <th>平台 / 角色 / ID</th>
+                  <th>任务摘要 &amp; 目标工程</th>
                   <th>主力模型</th>
                   <th>轮数(主+子)</th>
-                  <th>失忆</th>
                   <th>耗时 T</th>
-                  <th>额度 C</th>
-                  <th>性价比 CE / P_CE</th>
-                  <th>质量分 Q (手改即时重训)</th>
+                  <th>总额度 C</th>
+                  <th>额度耗用率</th>
+                  <th>任务完成质量 Q_task (手改即时重训)</th>
                 </tr>
               </thead>
               <tbody></tbody>

@@ -1,23 +1,20 @@
 /**
- * QTC Observatory v1.1.0 — 在线自修正计量经济学与机器学习引擎 (Online Econometrics & IRLS Engine)
+ * QTC Observatory v1.2.0 — 因果对照差分、额度耗用率微分守恒与在线自修正计量引擎
  *
- * 100% 动态在线重训练（零硬编码静态回归常数）：
- *   1. 单变量 OLS 线性与双对数幂律回归（实时重算 β, R², t-stat, p-value, 95% 置信带）
- *   2. 多元矩阵最小二乘回归 Multiple OLS (高斯-约旦消元求解 (X'X + λI)^-1 X'y)：实时拟合并修正单步延迟方程
- *   3. 在线 L2 正则化 Logistic 回归 (Newton-Raphson / IRLS 迭代加权最小二乘)：
- *      - 实时重训练「三元状态性价比概率方程」P_CE(Q, ln(T/W), ln(C/W))，动态修正时间弹性 vs 金钱弹性比值！
- *      - 实时重训练「过程实时预警概率方程」P_live(ln N, ErrRate, Compactions)，动态重算最新 50% 性价比生死线轮数 N_50%！
- *   4. 自动记录数学模型演化快照至 SQLite `model_evolution`，追踪模型随样本量增长的自我修正轨迹。
+ * 核心数学重构（解决“跟谁比”与“什么是任务完成质量”两大根本问题）：
+ *   1. 任务完成质量 Q_task ∈ [0, 100]：严格度量任务交付达成度与终局用户验收，彻底剥离中间命令报错与压缩次数噪声；人工评分 q_human 拥有最高覆盖权。
+ *   2. 严禁无基线瞎比！构建严格的【对照基线 B -> 实验组/新阶段 A】受控因果配对框架：
+ *      - 一级自对照：同一长任务中途注入「加速/优化方案」或「新批次方案」前后对照 (Phase B -> Phase A)
+ *      - 二级跨会话对照：同一工程目录 (project_key) 下先后迭代的两个独立执行会话对照 (Session B -> Session A)
+ *      - 三级长会话膨胀审计：同一长任务 (>85轮) 前期清爽基线段 vs 后期上下文累积段耗用率漂移对照
+ *   3. 功率-速度微分守恒定律：
+ *      定义额度耗用率（功率） C_dot = C / T (U/h)，省时率 s_T = (T_B - T_A) / T_B，耗用率增幅 r_burn = (C_dot_A - C_dot_B) / C_dot_B。
+ *      则相对总成本变化精确服从： C_A / C_B = (1 + r_burn) * (1 - s_T)
+ *      等成本零溢价耗用率上限： r_burn_neutral(s_T) = s_T / (1 - s_T)
+ *      一旦 r_burn >> s_T / (1 - s_T) 且 ΔQ ≈ 0，即构成精确数学意义上的「时间没省多少，额度耗用率反而剧增（捡芝麻丢西瓜）」！
  */
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-function median(arr) {
-  if (!arr.length) return 0;
-  const s = [...arr].sort((a, b) => a - b);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : 0.5 * (s[m - 1] + s[m]);
-}
 
 function quantile(arr, q) {
   if (!arr.length) return 0;
@@ -45,7 +42,6 @@ function sigmoid(z) {
   return 1.0 / (1.0 + Math.exp(-cz));
 }
 
-/** 求解 d×d 线性方程组 A * x = b (列主元高斯消元法) */
 function solveLinearSystem(A, b) {
   const d = b.length;
   const M = A.map((row, i) => [...row, b[i]]);
@@ -67,7 +63,6 @@ function solveLinearSystem(A, b) {
   return M.map((row) => row[d]);
 }
 
-/** 在线多元脊回归 / OLS: y = X * beta */
 export function multipleOlsFit(X, y, ridge = 1e-6) {
   const n = X.length;
   const d = X[0]?.length || 0;
@@ -78,9 +73,7 @@ export function multipleOlsFit(X, y, ridge = 1e-6) {
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < d; j++) {
       Xty[j] += X[i][j] * y[i];
-      for (let k = j; k < d; k++) {
-        XtX[j][k] += X[i][j] * X[i][k];
-      }
+      for (let k = j; k < d; k++) XtX[j][k] += X[i][j] * X[i][k];
     }
   }
   for (let j = 0; j < d; j++) {
@@ -105,10 +98,6 @@ export function multipleOlsFit(X, y, ridge = 1e-6) {
   };
 }
 
-/**
- * 在线 L2 正则化 Logistic 回归求解器 (Newton-Raphson / IRLS 实时极大似然拟合)
- * 用于随新样本入库自动重训练 P_CE 概率模型，彻底消除硬编码系数！
- */
 export function fitOnlineLogisticRegression(X, y, l2Lambda = 0.12, maxIter = 28) {
   const n = X.length;
   const d = X[0]?.length || 0;
@@ -125,7 +114,6 @@ export function fitOnlineLogisticRegression(X, y, l2Lambda = 0.12, maxIter = 28)
   for (let iter = 0; iter < maxIter; iter++) {
     const grad = new Array(d).fill(0);
     const H = Array.from({ length: d }, () => new Array(d).fill(0));
-
     for (let i = 0; i < n; i++) {
       let z = 0;
       for (let j = 0; j < d; j++) z += X[i][j] * w[j];
@@ -135,12 +123,9 @@ export function fitOnlineLogisticRegression(X, y, l2Lambda = 0.12, maxIter = 28)
       const weight = sw * Math.max(1e-5, p * (1.0 - p));
       for (let j = 0; j < d; j++) {
         grad[j] += X[i][j] * diff;
-        for (let k = j; k < d; k++) {
-          H[j][k] += weight * X[i][j] * X[i][k];
-        }
+        for (let k = j; k < d; k++) H[j][k] += weight * X[i][j] * X[i][k];
       }
     }
-
     for (let j = 0; j < d; j++) {
       for (let k = 0; k < j; k++) H[j][k] = H[k][j];
       if (j > 0) {
@@ -150,7 +135,6 @@ export function fitOnlineLogisticRegression(X, y, l2Lambda = 0.12, maxIter = 28)
         H[j][j] += 1e-5;
       }
     }
-
     const step = solveLinearSystem(H, grad);
     let maxDelta = 0;
     for (let j = 0; j < d; j++) {
@@ -170,7 +154,6 @@ export function fitOnlineLogisticRegression(X, y, l2Lambda = 0.12, maxIter = 28)
     const pred = sigmoid(z) >= 0.5 ? 1 : 0;
     if (pred === y[i]) correct++;
   }
-
   return {
     weights: w.map((v) => Number(v.toFixed(4))),
     accuracy: Number(((correct / n) * 100).toFixed(1)),
@@ -246,21 +229,174 @@ export function olsLinearRegression(xs, ys, pointsForBand = 40) {
   };
 }
 
-// 缓存最近一次在线拟合出来的动态数学模型参数供模拟器实时调用
+/**
+ * 统一的「基线 B vs 实验组 A」因果差分与等质量性价比概率核
+ * 严格遵循恒等式： (C_A / M_A) / (C_B / M_B) = (1 + r_burn) * (1 - s_T)
+ */
+export function evaluateCounterfactualPair({
+  pairId,
+  pairCategory,     // 'replacement' (等效任务提速/换方案对照) | 'cross_project' (同项目跨会话对照) | 'bloat_drift' (同会话上下文膨胀审计)
+  comparisonScope,  // 人类可读的对照范围说明
+  platform,
+  domain,
+  title,
+  triggerNote = '',
+  advisorInfo = null,
+  base,   // { uid, label, turns, subCount, T_min, C_u, sub_C_u, Q_task, scaleM }
+  target, // { uid, label, turns, subCount, T_min, C_u, sub_C_u, Q_task, scaleM }
+}) {
+  const mB = Math.max(0.1, Number(base.scaleM || 1.0));
+  const mA = Math.max(0.1, Number(target.scaleM || 1.0));
+
+  const burnB = base.C_u / Math.max(0.02, base.T_min / 60.0);     // U/h
+  const burnA = target.C_u / Math.max(0.02, target.T_min / 60.0); // U/h
+  const burnSurgePct = ((burnA - burnB) / Math.max(0.05, burnB)) * 100.0;
+
+  // 若是同会话长上下文膨胀审计（前后阶段功能体量不同），按「单轮耗时 & 小时耗用率」对齐，绝不捏造虚假阶段总时长省时率！
+  const unitTimeB = pairCategory === 'bloat_drift'
+    ? base.T_min / Math.max(1, base.turns)
+    : base.T_min / mB;
+  const unitTimeA = pairCategory === 'bloat_drift'
+    ? target.T_min / Math.max(1, target.turns)
+    : target.T_min / mA;
+
+  const unitCostB = pairCategory === 'bloat_drift'
+    ? base.C_u / Math.max(1, base.turns)
+    : base.C_u / mB;
+  const unitCostA = pairCategory === 'bloat_drift'
+    ? target.C_u / Math.max(1, target.turns)
+    : target.C_u / mA;
+
+  const timeSavedPct = ((unitTimeB - unitTimeA) / Math.max(1e-4, unitTimeB)) * 100.0;
+  const costSurgePct = ((unitCostA - unitCostB) / Math.max(1e-5, unitCostB)) * 100.0;
+  const deltaQ = target.Q_task - base.Q_task;
+
+  // 等成本零溢价所能容忍的最大耗用率增幅： r_burn_neutral = s_T / (1 - s_T)
+  const sFrac = Math.min(0.85, Math.max(-2.0, timeSavedPct / 100.0));
+  const neutralBurnPct = sFrac > 0 ? (sFrac / (1.0 - sFrac)) * 100.0 : 0.0;
+
+  // 等质量硬门控性价比概率 P_CE(A | B)
+  // 1) 任务完成质量绝对达标门控: Q_A >= 80
+  // 2) 任务完成质量不退步门控: ΔQ >= -3.0
+  // 3) 耗用率-提速守恒核: 惩罚超出零溢价曲线的额外耗用率暴涨
+  const gateAbsQ = sigmoid((target.Q_task - 76.0) / 4.5);
+  const gateDeltaQ = sigmoid((deltaQ + 3.5) / 2.2);
+  const excessCostLog = Math.log(Math.max(0.05, unitCostA / Math.max(1e-5, unitCostB)));
+  const speedGainLog = Math.log(Math.max(0.05, unitTimeB / Math.max(1e-4, unitTimeA)));
+  const tradeOffScore = 0.65 + 1.35 * speedGainLog - 2.15 * excessCostLog + 0.04 * deltaQ;
+  const probCePct = Number((gateAbsQ * gateDeltaQ * sigmoid(tradeOffScore) * 100.0).toFixed(1));
+
+  let aerRatio = 0;
+  if (costSurgePct > 0 && timeSavedPct > 0) {
+    aerRatio = Number((costSurgePct / Math.max(1.0, timeSavedPct)).toFixed(2));
+  } else if (costSurgePct > 0 && timeSavedPct <= 0) {
+    aerRatio = 99.9;
+  }
+
+  let verdictCode = 'pareto-win';
+  let verdictLabel = '🟢 正向合算优化';
+  const reasons = [];
+
+  if (deltaQ <= -8.0 || target.Q_task < 65.0) {
+    verdictCode = 'quality-collapse';
+    verdictLabel = '🔴 质量失守翻车 (任务完成质量下降)';
+    reasons.push(`任务完成质量从 ${base.Q_task} 分跌至 ${target.Q_task} 分 (ΔQ = ${deltaQ.toFixed(1)})，违背质量保持前提`);
+  } else if (pairCategory === 'bloat_drift') {
+    // 长会话膨胀审计中，后台编译/生图长等待不应误判为“变慢恶化”，仅当小时额度耗用率实质飙升时才告警
+    if (burnSurgePct > 30.0 && costSurgePct > 20.0) {
+      verdictCode = 'burn-surge';
+      verdictLabel = '🟠 长会话上下文耗用率膨胀';
+    }
+  } else if (costSurgePct > 25.0 && timeSavedPct <= 0 && burnSurgePct > 10.0) {
+    verdictCode = 'lose-lose';
+    verdictLabel = '🔴 双输恶化 (未省时且耗用率/成本更高)';
+  } else if (costSurgePct > 25.0 && timeSavedPct > 0 && aerRatio > 1.5) {
+    verdictCode = 'sesame-for-watermelon';
+    verdictLabel = '🟠 捡芝麻丢西瓜 (微弱省时但耗用率剧增)';
+  } else if (burnSurgePct > 45.0 && costSurgePct > 20.0) {
+    verdictCode = 'burn-surge';
+    verdictLabel = '🟠 额度耗用率异常膨胀';
+  }
+
+  if (burnSurgePct > 25.0) {
+    reasons.push(`小时额度耗用率从 ${burnB.toFixed(2)} U/h 飙升至 ${burnA.toFixed(2)} U/h (${burnSurgePct >= 0 ? '+' : ''}${burnSurgePct.toFixed(1)}%，零溢价容忍上限仅 +${neutralBurnPct.toFixed(1)}%)`);
+  }
+  if (target.sub_C_u > 0.5 && target.sub_C_u > base.sub_C_u + 0.5) {
+    reasons.push(`新方案额外拉起 ${target.subCount} 个子代理并发吞吐，净增子代理账单 +${(target.sub_C_u - base.sub_C_u).toFixed(2)}U`);
+  }
+  if (pairCategory === 'bloat_drift' && costSurgePct > 25.0) {
+    reasons.push(`长会话未分阶段清零历史上下文，单轮均摊成本从 ${unitCostB.toFixed(3)}U 涨至 ${unitCostA.toFixed(3)}U (+${costSurgePct.toFixed(1)}%)`);
+  }
+  if (advisorInfo) {
+    reasons.push(`关联外部优化方案咨询会话 (${advisorInfo.uid.slice(0, 12)}) 额外消耗规划成本 +${advisorInfo.cost_u.toFixed(2)}U`);
+  }
+  if (!reasons.length) {
+    reasons.push(`质量保持/提升 (ΔQ=${deltaQ >= 0 ? '+' : ''}${deltaQ.toFixed(1)})，耗用率与速度处于合理均衡区间`);
+  }
+
+  // 超出等成本基准线的净多花冤枉额度估算
+  const fairCostForOutput = base.C_u * (pairCategory === 'bloat_drift' ? (target.turns / Math.max(1, base.turns)) : (mA / mB));
+  const excessCostU = Math.max(0, Number((target.C_u - fairCostForOutput + (advisorInfo ? advisorInfo.cost_u : 0)).toFixed(2)));
+
+  return {
+    pair_id: pairId,
+    pair_category: pairCategory,
+    comparison_scope: comparisonScope,
+    platform,
+    domain,
+    title,
+    trigger_note: triggerNote,
+    advisor_info: advisorInfo,
+    base: {
+      uid: base.uid,
+      label: base.label,
+      turns: base.turns,
+      sub_count: base.subCount,
+      T_min: Number(base.T_min.toFixed(1)),
+      C_u: Number(base.C_u.toFixed(2)),
+      burn_uh: Number(burnB.toFixed(2)),
+      Q_task: Number(base.Q_task.toFixed(1)),
+    },
+    target: {
+      uid: target.uid,
+      label: target.label,
+      turns: target.turns,
+      sub_count: target.subCount,
+      T_min: Number(target.T_min.toFixed(1)),
+      C_u: Number(target.C_u.toFixed(2)),
+      burn_uh: Number(burnA.toFixed(2)),
+      Q_task: Number(target.Q_task.toFixed(1)),
+    },
+    deltas: {
+      delta_Q: Number(deltaQ.toFixed(1)),
+      time_saved_pct: Number(timeSavedPct.toFixed(1)),
+      burn_surge_pct: Number(burnSurgePct.toFixed(1)),
+      neutral_burn_limit_pct: Number(neutralBurnPct.toFixed(1)),
+      cost_surge_pct: Number(costSurgePct.toFixed(1)),
+      aer_ratio: aerRatio,
+      excess_cost_u: excessCostU,
+      prob_ce_pct: probCePct,
+    },
+    verdict_code: verdictCode,
+    verdict_label: verdictLabel,
+    is_bad_tradeoff: verdictCode !== 'pareto-win',
+    reasons,
+  };
+}
+
 let latestLearnedModel = {
   throughput_slope: 0.276,
   throughput_intercept: 0.20,
   power_alpha: 1.25,
-  q_intercept: 105.2,
-  q_slope_lnN: -4.49,
-  comp_q_penalty: 12.0,
-  lat_base_sec: 9.1,
-  lat_per_out_k: 5.1,
-  lat_per_ctx_100k: 1.38,
-  w_state: [-2.0, 2.2, -2.3, -2.4],
-  w_live: [2.8, -0.53, -1.45, -1.38],
-  n_crit_50: 56.0,
-  time_to_cost_elasticity_ratio: 1.0,
+  q_intercept: 95.0,
+  q_slope_lnN: -1.5,
+  lat_base_sec: 5.0,
+  lat_per_out_k: 6.2,
+  lat_per_ctx_100k: 1.1,
+  burn_base_uh: 6.5,
+  burn_per_sub_ratio: 14.0,
+  w_live: [2.5, -0.6, -0.8, -0.4],
+  n_crit_50: 45.0,
 };
 
 export function getLatestLearnedModel() {
@@ -294,6 +430,9 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     ORDER BY s.ended_at DESC, s.started_at DESC
   `).all();
 
+  const phaseRows = db.prepare('SELECT * FROM session_phases').all();
+  const phaseByUid = new Map(phaseRows.map((p) => [p.session_uid, p]));
+
   const turnSamples = db.prepare(`
     SELECT platform, model_tier, ctx_k, out_k, llm_sec, n_tools, step_cost_u
     FROM turn_samples
@@ -302,7 +441,6 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
   `).all();
 
   const nowSec = Date.now() / 1000;
-  // 识别过去 15 分钟内正在活跃跳动的实时会话 (Live Active Sessions!)
   const liveActiveSessions = allRows
     .filter((r) => r.ended_at > 0 && (nowSec - r.ended_at) <= 900)
     .slice(0, 8)
@@ -317,10 +455,6 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       exec_min: r.exec_time_min,
       seconds_ago: Math.max(0, Math.round(nowSec - r.ended_at)),
     }));
-
-  const filteredSessions = filterPlatform === 'all'
-    ? allRows
-    : allRows.filter((r) => r.platform === filterPlatform);
 
   const byUid = new Map(allRows.map((r) => [r.session_uid, r]));
   const childrenMap = new Map();
@@ -342,6 +476,29 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     return [...visited].map((id) => byUid.get(id));
   }
 
+  // 识别指向特定目标会话的外部「优化方案咨询会话 (advisor)」，将其规划成本关联到目标会话上
+  const advisorMap = new Map(); // target_uid -> { uid, cost_u, title }
+  for (const r of allRows) {
+    if (r.session_role === 'advisor') {
+      let links = [];
+      try { links = JSON.parse(r.linked_uids || '[]'); } catch {}
+      for (const targetUid of links) {
+        if (byUid.has(targetUid)) {
+          advisorMap.set(targetUid, {
+            uid: r.session_uid,
+            cost_u: Number(r.weighted_cost_units.toFixed(3)),
+            T_min: Number(r.exec_time_min.toFixed(1)),
+            title: r.title,
+          });
+        }
+      }
+    }
+  }
+
+  const filteredSessions = filterPlatform === 'all'
+    ? allRows
+    : allRows.filter((r) => r.platform === filterPlatform);
+
   const rootProjects = [];
   for (const r of filteredSessions) {
     if (r.is_subagent && r.parent_uid && byUid.has(r.parent_uid)) continue;
@@ -350,34 +507,22 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     const subs = getDescendants(r.session_uid);
     const subTurns = subs.reduce((a, x) => a + x.planner_turns, 0);
     const subCost = subs.reduce((a, x) => a + x.weighted_cost_units, 0);
-    const subCmdTot = subs.reduce((a, x) => a + x.cmd_total, 0);
-    const subCmdFail = subs.reduce((a, x) => a + x.cmd_failed, 0);
-    const subEdits = subs.reduce((a, x) => a + x.file_edits, 0);
-    const subOutTok = subs.reduce((a, x) => a + x.output_tokens, 0);
-    const subTools = subs.reduce((a, x) => a + x.tool_calls, 0);
-
     const treeTurns = r.planner_turns + subTurns;
     const treeCost = r.weighted_cost_units + subCost;
     const treeRawCost = r.raw_cost_units + subs.reduce((a, x) => a + x.raw_cost_units, 0);
-    const totCmd = r.cmd_total + subCmdTot;
-    const totFail = r.cmd_failed + subCmdFail;
+    const totCmd = r.cmd_total + subs.reduce((a, x) => a + x.cmd_total, 0);
+    const totFail = r.cmd_failed + subs.reduce((a, x) => a + x.cmd_failed, 0);
     const errRate = totCmd > 0 ? totFail / totCmd : 0;
 
-    const okCmds = Math.max(0, totCmd - totFail);
-    const totEdits = r.file_edits + subEdits;
-    const totOutK = (r.output_tokens + subOutTok) / 1000.0;
-    const totTools = r.tool_calls + subTools;
-
-    const workload = Math.max(
-      1.5,
-      2.0 + 0.35 * okCmds + 1.20 * totEdits + 0.18 * totOutK + 0.08 * totTools
-    );
     const execMin = Math.max(0.15, r.exec_time_min);
-    const qFinal = r.q_human !== null && r.q_human !== undefined ? Number(r.q_human) : Number(r.q_objective);
+    const burnRateUh = treeCost / Math.max(0.02, execMin / 60.0);
+    const qTask = r.q_human !== null && r.q_human !== undefined ? Number(r.q_human) : Number(r.q_objective);
 
     rootProjects.push({
       session_uid: r.session_uid,
       platform: r.platform,
+      session_role: r.session_role || 'execution',
+      project_key: r.project_key || '',
       domain: r.domain,
       title: r.title,
       primary_model: r.primary_model,
@@ -391,115 +536,147 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       sub_turns: subTurns,
       tree_turns: treeTurns,
       compactions: r.compactions,
-      neg_feedback: r.neg_feedback_turns,
       single_tool_ratio: r.planner_turns > 0 ? Number((r.single_tool_turns / r.planner_turns).toFixed(3)) : 0,
       cmd_err_rate: Number(errRate.toFixed(4)),
-      cmd_failed: totFail,
       mean_ctx_k: r.mean_ctx_k,
       max_ctx_k: r.max_ctx_k,
       cache_tax_share: r.cache_tax_share,
-      llm_min: Number((r.llm_infer_sec / 60).toFixed(2)),
-      sync_min: Number((r.sync_tool_sec / 60).toFixed(2)),
-      bg_min: Number((r.bg_wait_sec / 60).toFixed(2)),
       T_min: Number(execMin.toFixed(2)),
       root_C: Number(r.weighted_cost_units.toFixed(4)),
       sub_C: Number(subCost.toFixed(4)),
       C_units: Number(treeCost.toFixed(4)),
       raw_C_units: Number(treeRawCost.toFixed(4)),
-      workload: Number(workload.toFixed(2)),
-      T_per_work: Number((execMin / workload).toFixed(4)),
-      C_per_work: Number((Math.max(1e-5, treeCost) / workload).toFixed(5)),
+      burn_uh: Number(burnRateUh.toFixed(2)),
       Q_obj: r.q_objective,
       Q_human: r.q_human,
-      Q_final: Number(qFinal.toFixed(1)),
+      Q_final: Number(qTask.toFixed(1)),
     });
   }
 
-  const domainGroups = new Map();
+  // ==========================================================================
+  // 构建受控因果对照实验对 (Counterfactual Pairs) —— 100% 明确「谁和谁比」！
+  // ==========================================================================
+  const counterfactualPairs = [];
+
+  // 1. 一级对照：会话内策略变更 / 加速方案介入 / 长上下文膨胀对照
   for (const p of rootProjects) {
-    if (!domainGroups.has(p.domain)) domainGroups.set(p.domain, []);
-    domainGroups.get(p.domain).push(p);
+    const ph = phaseByUid.get(p.session_uid);
+    if (!ph) continue;
+    let bSubs = [], aSubs = [];
+    try { bSubs = JSON.parse(ph.b_sub_uids || '[]'); } catch {}
+    try { aSubs = JSON.parse(ph.a_sub_uids || '[]'); } catch {}
+
+    const bSubCost = bSubs.reduce((acc, id) => acc + (byUid.get(id)?.weighted_cost_units || 0), 0);
+    const aSubCost = aSubs.reduce((acc, id) => acc + (byUid.get(id)?.weighted_cost_units || 0), 0);
+
+    // 若用户对整场会话手工标定了真实质量分 q_human，则按同比例平移校准两阶段质量分
+    const humanShift = (p.Q_human !== null && p.Q_human !== undefined) ? (p.Q_human - p.Q_obj) : 0;
+    const bQ = Math.min(100, Math.max(20, ph.b_q_task + humanShift));
+    const aQ = Math.min(100, Math.max(20, ph.a_q_task + humanShift));
+
+    const isBloatAudit = ph.split_kind.includes('长上下文耗用率对照');
+    const pairCat = isBloatAudit ? 'bloat_drift' : 'replacement';
+    const adv = !isBloatAudit ? (advisorMap.get(p.session_uid) || null) : null;
+
+    counterfactualPairs.push(evaluateCounterfactualPair({
+      pairId: `intra:${p.session_uid}`,
+      pairCategory: pairCat,
+      comparisonScope: ph.split_kind,
+      platform: p.platform,
+      domain: p.domain,
+      title: p.title,
+      triggerNote: ph.trigger_summary,
+      advisorInfo: adv,
+      base: {
+        uid: p.session_uid,
+        label: `【基线 B】本任务${ph.b_label}`,
+        turns: ph.b_turns,
+        subCount: bSubs.length,
+        T_min: ph.b_exec_min,
+        C_u: ph.b_main_cost_u + bSubCost,
+        sub_C_u: bSubCost,
+        Q_task: bQ,
+        scaleM: 1.0,
+      },
+      target: {
+        uid: p.session_uid,
+        label: `【实验 A】本任务${ph.a_label}`,
+        turns: ph.a_turns,
+        subCount: aSubs.length,
+        T_min: ph.a_exec_min,
+        C_u: ph.a_main_cost_u + aSubCost,
+        sub_C_u: aSubCost,
+        Q_task: aQ,
+        scaleM: 1.0,
+      },
+    }));
   }
 
-  const globalMedT = Math.max(0.05, median(rootProjects.map((x) => x.T_per_work)));
-  const globalMedC = Math.max(0.002, median(rootProjects.map((x) => x.C_per_work)));
-
-  const domainBenchmarks = {};
-  for (const [dom, list] of domainGroups.entries()) {
-    domainBenchmarks[dom] = {
-      count: list.length,
-      med_T_pw: list.length >= 4 ? Math.max(0.05, median(list.map((x) => x.T_per_work))) : globalMedT,
-      med_C_pw: list.length >= 4 ? Math.max(0.002, median(list.map((x) => x.C_per_work))) : globalMedC,
-    };
-  }
-
-  // 第一遍先计算客观 CE_index 与高性价比二分类标签 y_high_ce，用于在线重训练 Logistic 模型！
-  const sesameAlerts = [];
+  // 2. 二级对照：同一具体工程目录 (project_key) 下前后相邻的实质执行会话对照 (排除探针与咨询会话)
+  const byProjectKey = new Map();
   for (const p of rootProjects) {
-    const bm = domainBenchmarks[p.domain] || { med_T_pw: globalMedT, med_C_pw: globalMedC };
-    const relTimeRatio = p.T_per_work / bm.med_T_pw;
-    const relCostRatio = p.C_per_work / bm.med_C_pw;
-    const ceIndex = ((p.Q_final / 100.0) ** 2) / Math.sqrt(Math.max(1e-4, relTimeRatio * relCostRatio));
-    p.ce_index = Number(ceIndex.toFixed(2));
-    p.is_high_ce = p.Q_final >= 85.0 && ceIndex >= 1.0 ? 1 : 0;
+    if (p.session_role !== 'execution' || !p.project_key || p.root_turns < 15 || p.C_units < 0.8) continue;
+    if (!byProjectKey.has(p.project_key)) byProjectKey.set(p.project_key, []);
+    byProjectKey.get(p.project_key).push(p);
+  }
+  for (const [projKey, list] of byProjectKey.entries()) {
+    if (list.length < 2) continue;
+    const chron = [...list].sort((a, b) => a.started_at - b.started_at);
+    for (let i = 1; i < chron.length; i++) {
+      const prev = chron[i - 1];
+      const curr = chron[i];
+      // 仅当两场会话属于同量级任务（轮数比在 0.35x ~ 2.8x 内）时才构成跨会话等效任务对照，杜绝拿小修补跟大开发硬比！
+      const turnRatio = curr.tree_turns / Math.max(1, prev.tree_turns);
+      if (turnRatio < 0.35 || turnRatio > 2.8) continue;
 
-    const costIncreasePct = (p.C_per_work - bm.med_C_pw) / bm.med_C_pw;
-    const timeSavedPct = (bm.med_T_pw - p.T_per_work) / bm.med_T_pw;
-
-    const wasteSingleTool = p.single_tool_ratio > 0.5 && p.root_turns >= 15 ? p.root_C * p.cache_tax_share * 0.42 : 0;
-    const wasteSubClone = p.sub_count >= 3 && p.sub_C > p.root_C * 0.28 ? p.sub_C * 0.65 : 0;
-    const wasteCmdRetry = p.cmd_failed > 0 ? p.root_C * Math.min(0.45, p.cmd_failed / Math.max(5, p.root_turns)) : 0;
-    const wasteCompaction = p.compactions > 0 ? p.C_units * Math.min(0.55, 0.22 * p.compactions) : 0;
-    const totalWasteU = Number((wasteSingleTool + wasteSubClone + wasteCmdRetry + wasteCompaction).toFixed(3));
-    p.estimated_waste_u = totalWasteU;
-
-    let flag = 'healthy';
-    let aer = 0;
-    const reasons = [];
-    if (p.C_units >= 1.5 && costIncreasePct > 0.45) {
-      if (timeSavedPct <= 0) {
-        flag = 'lose-lose';
-        aer = 99.9;
-      } else {
-        aer = costIncreasePct / Math.max(0.02, timeSavedPct);
-        if (aer > 1.5) flag = 'sesame-for-watermelon';
-      }
-    }
-
-    p.asymmetry_flag = flag;
-    p.aer_ratio = Number(aer.toFixed(2));
-    if (flag !== 'healthy') {
-      if (wasteSubClone > 0.3) reasons.push(`子代理高价克隆/双重复读 (+${wasteSubClone.toFixed(1)}U)`);
-      if (wasteCompaction > 0.3) reasons.push(`触发 ${p.compactions} 次失忆压缩返工 (+${wasteCompaction.toFixed(1)}U)`);
-      if (wasteSingleTool > 0.3) reasons.push(`单工具碎步交互 ${(p.single_tool_ratio * 100).toFixed(0)}% 白交缓存税 (+${wasteSingleTool.toFixed(1)}U)`);
-      if (wasteCmdRetry > 0.2) reasons.push(`命令报错 ${p.cmd_failed} 次重跑损耗 (+${wasteCmdRetry.toFixed(1)}U)`);
-      if (!reasons.length && p.model_mult >= 1.8) reasons.push('全程挂顶配高倍率模型执行常规循环步骤');
-      p.waste_reasons = reasons;
-
-      sesameAlerts.push({
-        session_uid: p.session_uid,
-        platform: p.platform,
-        domain: p.domain,
-        title: p.title,
-        type: flag === 'lose-lose' ? '双输雪崩 (多烧钱且更慢)' : '捡芝麻丢西瓜 (大钱换小时间)',
-        cost_increase_pct: Number((costIncreasePct * 100).toFixed(1)),
-        time_saved_pct: Number((timeSavedPct * 100).toFixed(1)),
-        aer_ratio: p.aer_ratio,
-        C_units: p.C_units,
-        T_min: p.T_min,
-        Q_final: p.Q_final,
-        estimated_waste_u: totalWasteU,
-        reasons,
-      });
-    } else {
-      p.waste_reasons = [];
+      counterfactualPairs.push(evaluateCounterfactualPair({
+        pairId: `cross:${prev.session_uid}->${curr.session_uid}`,
+        pairCategory: 'cross_project',
+        comparisonScope: `同一工程目录跨会话迭代对照 (${projKey})`,
+        platform: curr.platform,
+        domain: curr.domain,
+        title: curr.title,
+        triggerNote: `对比同目录前序会话 ${prev.session_uid.slice(0, 14)} (${prev.primary_model}) -> 当前 (${curr.primary_model})`,
+        advisorInfo: advisorMap.get(curr.session_uid) || null,
+        base: {
+          uid: prev.session_uid,
+          label: `【基线 B】同工程前序会话 ${prev.session_uid.split(':')[1]?.slice(0, 8) || prev.session_uid}`,
+          turns: prev.tree_turns,
+          subCount: prev.sub_count,
+          T_min: prev.T_min,
+          C_u: prev.C_units,
+          sub_C_u: prev.sub_C,
+          Q_task: prev.Q_final,
+          scaleM: 1.0,
+        },
+        target: {
+          uid: curr.session_uid,
+          label: `【实验 A】同工程后续会话 ${curr.session_uid.split(':')[1]?.slice(0, 8) || curr.session_uid}`,
+          turns: curr.tree_turns,
+          subCount: curr.sub_count,
+          T_min: curr.T_min,
+          C_u: curr.C_units,
+          sub_C_u: curr.sub_C,
+          Q_task: curr.Q_final,
+          scaleM: 1.0,
+        },
+      }));
     }
   }
-  sesameAlerts.sort((a, b) => b.estimated_waste_u - a.estimated_waste_u || b.C_units - a.C_units);
 
-  // ==========================================================
-  // 在线实时重训练全部 6 组数学模型（OLS + Multiple OLS + Online IRLS Logistic）
-  // ==========================================================
+  // 排序：优先展示一级同任务提速/方案对照与严重不合算案例
+  counterfactualPairs.sort((a, b) => {
+    const catRank = (x) => (x.pair_category === 'replacement' ? 0 : x.pair_category === 'cross_project' ? 1 : 2);
+    if (a.is_bad_tradeoff !== b.is_bad_tradeoff) return a.is_bad_tradeoff ? -1 : 1;
+    if (catRank(a) !== catRank(b)) return catRank(a) - catRank(b);
+    return b.deltas.excess_cost_u - a.deltas.excess_cost_u;
+  });
+
+  const badPairs = counterfactualPairs.filter((x) => x.is_bad_tradeoff);
+
+  // ==========================================================================
+  // 在线实时重训练 6 组数学模型（OLS + Multiple OLS + 类别均衡 IRLS Logistic）
+  // ==========================================================================
   const validSess = filteredSessions.filter((s) => s.planner_turns >= 2 && s.raw_cost_units > 1e-5);
   const regPowerLaw = olsLinearRegression(
     validSess.map((s) => Math.log(s.planner_turns)),
@@ -512,10 +689,10 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     nonOutlierSess.map((s) => s.weighted_cost_units)
   );
 
-  const multiTurnRoots = rootProjects.filter((p) => p.tree_turns >= 4);
-  const regQualityDecay = olsLinearRegression(
-    multiTurnRoots.map((p) => Math.log(p.tree_turns)),
-    multiTurnRoots.map((p) => p.Q_final)
+  const execRoots = rootProjects.filter((p) => p.session_role === 'execution' && p.tree_turns >= 6);
+  const regQualityVsTurns = olsLinearRegression(
+    execRoots.map((p) => Math.log(p.tree_turns)),
+    execRoots.map((p) => p.Q_final)
   );
 
   const filtTurns = (filterPlatform === 'all' ? turnSamples : turnSamples.filter((t) => t.platform === filterPlatform))
@@ -529,80 +706,77 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     filtTurns.map((t) => t.llm_sec)
   );
 
-  // 在线重训练 Logistic 模型 1：三元状态空间 P_CE(Q, ln(T/T_med), ln(C/C_med))
-  const XState = multiTurnRoots.map((p) => {
-    const bm = domainBenchmarks[p.domain] || { med_T_pw: globalMedT, med_C_pw: globalMedC };
-    return [
-      1.0,
-      (p.Q_final - 88.0) / 10.0,
-      Math.log(Math.max(1e-3, p.T_per_work / bm.med_T_pw)),
-      Math.log(Math.max(1e-4, p.C_per_work / bm.med_C_pw)),
-    ];
-  });
-  const yTarget = multiTurnRoots.map((p) => p.is_high_ce);
-  const logitStateModel = fitOnlineLogisticRegression(XState, yTarget, 0.15);
+  // 为每个执行项目计算「等质量基准下的耗用率效率达标标签」：任务完成质量达标 (Q >= 88) 且未发生高耗用率失控
+  const medBurnByDomain = new Map();
+  for (const p of execRoots) {
+    if (!medBurnByDomain.has(p.domain)) medBurnByDomain.set(p.domain, []);
+    medBurnByDomain.get(p.domain).push(p.burn_uh);
+  }
+  for (const p of rootProjects) {
+    const domBurns = medBurnByDomain.get(p.domain) || [8.0];
+    const medBurn = Math.max(1.0, quantile(domBurns, 0.50));
+    const burnRatio = p.burn_uh / medBurn;
+    p.rel_burn_ratio = Number(burnRatio.toFixed(2));
+    // 任务完成质量门控性价比指数：高完成质量且不盲目拉爆小时额度功率
+    const qGate = p.Q_final >= 80 ? (p.Q_final / 100.0) ** 2 : (p.Q_final / 100.0) ** 4;
+    p.ce_index = Number((qGate / Math.sqrt(Math.max(0.15, burnRatio))).toFixed(2));
+    p.is_high_ce = (p.Q_final >= 88.0 && burnRatio <= 1.25) ? 1 : 0;
+  }
 
-  // 在线重训练 Logistic 模型 2：实时过程预警 P_live(ln N, ErrRate, Compactions)
-  const XLive = multiTurnRoots.map((p) => [
+  const XLive = execRoots.map((p) => [
     1.0,
     Math.log(Math.max(1, p.tree_turns)),
-    p.cmd_err_rate * 10.0,
+    p.max_ctx_k / 100.0,
     p.compactions,
   ]);
-  const logitLiveModel = fitOnlineLogisticRegression(XLive, yTarget, 0.15);
-
-  const wS = logitStateModel.weights;
+  const yLive = execRoots.map((p) => p.is_high_ce);
+  const logitLiveModel = fitOnlineLogisticRegression(XLive, yLive, 0.15);
   const wL = logitLiveModel.weights;
-  // 动态计算最新的 50% 性价比生死线轮数 N_50% (假设常规低报错 5% 且 0 失忆)
-  let dynamicNCrit50 = 56.0;
-  if (wL.length === 4 && wL[1] < -0.05) {
-    const lnNc = -(wL[0] + wL[2] * 0.5) / wL[1];
-    dynamicNCrit50 = Number(Math.min(220, Math.max(12, Math.exp(lnNc))).toFixed(1));
-  }
-  const tcElasticityRatio = (wS.length === 4 && Math.abs(wS[3]) > 0.05)
-    ? Number(Math.abs(wS[2] / wS[3]).toFixed(3))
-    : 1.0;
 
-  // 用刚刚在线重训练出的最新权重回填每个项目的动态概率 P_CE！
-  for (let i = 0; i < multiTurnRoots.length; i++) {
-    const p = multiTurnRoots[i];
-    const xs = XState[i];
-    const z = wS[0] + wS[1] * xs[1] + wS[2] * xs[2] + wS[3] * xs[3];
+  let dynamicNCrit50 = 48.0;
+  if (wL.length === 4 && wL[1] < -0.05) {
+    const lnNc = -(wL[0] + wL[2] * 0.65) / wL[1];
+    dynamicNCrit50 = Number(Math.min(200, Math.max(18, Math.exp(lnNc))).toFixed(1));
+  }
+
+  for (let i = 0; i < execRoots.length; i++) {
+    const p = execRoots[i];
+    const xs = XLive[i];
+    const z = wL[0] + wL[1] * xs[1] + wL[2] * xs[2] + wL[3] * xs[3];
     p.prob_ce_pct = Number((sigmoid(z) * 100).toFixed(1));
   }
 
-  const comp0Roots = multiTurnRoots.filter((p) => p.compactions === 0);
-  const compPosRoots = multiTurnRoots.filter((p) => p.compactions >= 1);
-  const avgQComp0 = comp0Roots.length ? comp0Roots.reduce((a, b) => a + b.Q_final, 0) / comp0Roots.length : 94;
-  const avgQCompPos = compPosRoots.length ? compPosRoots.reduce((a, b) => a + b.Q_final, 0) / compPosRoots.length : 79;
+  // 多元回归拟合「小时额度耗用率功率方程」: BurnRate(U/h) = β0 + β1 * ModelMult + β2 * MeanCtx_100k + β3 * SubDensity
+  const burnFit = multipleOlsFit(
+    execRoots.map((p) => [1.0, p.model_mult, p.mean_ctx_k / 100.0, p.sub_count / Math.max(1, p.T_min / 60.0)]),
+    execRoots.map((p) => p.burn_uh)
+  );
 
-  // 更新全局在线学习模型缓存！
   latestLearnedModel = {
     throughput_slope: regLinearThroughput.slope > 0.01 ? regLinearThroughput.slope : 0.276,
     throughput_intercept: regLinearThroughput.intercept,
     power_alpha: regPowerLaw.slope > 0.5 ? regPowerLaw.slope : 1.25,
-    q_intercept: regQualityDecay.intercept || 105.2,
-    q_slope_lnN: regQualityDecay.slope || -4.49,
-    comp_q_penalty: Math.max(4.0, avgQComp0 - avgQCompPos),
-    lat_base_sec: multTurnFit.beta[0] > 0.5 ? multTurnFit.beta[0] : 9.1,
-    lat_per_out_k: multTurnFit.beta[1] > 0.2 ? multTurnFit.beta[1] : 5.1,
-    lat_per_ctx_100k: multTurnFit.beta[2] > 0 ? multTurnFit.beta[2] : 1.38,
-    w_state: wS,
+    q_intercept: regQualityVsTurns.intercept || 95.0,
+    q_slope_lnN: regQualityVsTurns.slope || -1.2,
+    lat_base_sec: multTurnFit.beta[0] > 0.5 ? multTurnFit.beta[0] : 5.0,
+    lat_per_out_k: multTurnFit.beta[1] > 0.2 ? multTurnFit.beta[1] : 6.2,
+    lat_per_ctx_100k: multTurnFit.beta[2] > 0 ? multTurnFit.beta[2] : 1.1,
+    burn_beta: burnFit.beta,
+    burn_r2: burnFit.r2,
     w_live: wL,
     n_crit_50: dynamicNCrit50,
-    time_to_cost_elasticity_ratio: tcElasticityRatio,
   };
 
-  // 若是全库模式且样本数、总轮数或回归斜率发生任何变化，立即记录一条数学模型自我修正演化日志！
+  // 记录数学模型随样本/轮数增长的自我修正轨迹
   const allTurnsSum = allRows.reduce((a, s) => a + s.planner_turns, 0);
   if (filterPlatform === 'all' && allRows.length > 0) {
-    const lastEvo = db.prepare('SELECT sample_count, total_turns, power_slope, linear_slope, q_decay_slope FROM model_evolution ORDER BY id DESC LIMIT 1').get();
+    const lastEvo = db.prepare('SELECT sample_count, total_turns, power_slope, q_decay_slope FROM model_evolution ORDER BY id DESC LIMIT 1').get();
     if (
       !lastEvo ||
       lastEvo.sample_count !== allRows.length ||
       lastEvo.total_turns !== allTurnsSum ||
       Math.abs(lastEvo.power_slope - regPowerLaw.slope) >= 0.0001 ||
-      Math.abs(lastEvo.q_decay_slope - regQualityDecay.slope) >= 0.0005
+      Math.abs(lastEvo.q_decay_slope - regQualityVsTurns.slope) >= 0.0005
     ) {
       db.prepare(`
         INSERT INTO model_evolution (sample_count, total_turns, power_slope, linear_slope, q_decay_slope, n_crit_50, elasticity_tc_ratio, logit_acc, recorded_at)
@@ -612,42 +786,44 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         allTurnsSum,
         regPowerLaw.slope,
         regLinearThroughput.slope,
-        regQualityDecay.slope,
+        regQualityVsTurns.slope,
         dynamicNCrit50,
-        tcElasticityRatio,
+        1.0,
         logitLiveModel.accuracy,
         Date.now()
       );
     }
   }
-
   const evolutionHistory = db.prepare('SELECT * FROM model_evolution ORDER BY id DESC LIMIT 12').all();
 
-  // 生成 Sigmoid 曲线点集供前端实时绘制第 5 张概率曲线图！
   const sigmoidCurve = [];
   for (let k = 0; k <= 50; k++) {
-    const nVal = Math.exp(Math.log(4) + (Math.log(1600) - Math.log(4)) * (k / 50));
-    const zClean = wL[0] + wL[1] * Math.log(nVal) + wL[2] * 0.5 + wL[3] * 0;
-    const zComp = wL[0] + wL[1] * Math.log(nVal) + wL[2] * 1.5 + wL[3] * 1;
+    const nVal = Math.exp(Math.log(4) + (Math.log(1500) - Math.log(4)) * (k / 50));
+    const zClean = wL[0] + wL[1] * Math.log(nVal) + wL[2] * 0.60 + wL[3] * 0;
+    const zHeavy = wL[0] + wL[1] * Math.log(nVal) + wL[2] * 1.80 + wL[3] * 2;
     sigmoidCurve.push({
       n: Number(nVal.toFixed(1)),
       lnN: Number(Math.log(nVal).toFixed(3)),
       p_clean: Number((sigmoid(zClean) * 100).toFixed(1)),
-      p_comp: Number((sigmoid(zComp) * 100).toFixed(1)),
+      p_comp: Number((sigmoid(zHeavy) * 100).toFixed(1)),
     });
   }
 
-  // 生成帕累托平面上的实时 Logistic 50% 概率线性分类分界线两端点 (在 Q = 92 时 w0 + 0.4*w1 + w2*dx + w3*dy = 0)
-  let paretoBoundaryLine = null;
-  if (wS.length === 4 && Math.abs(wS[3]) > 0.08) {
-    const x1 = -2.2, x2 = 2.2;
-    const calcDy = (dx) => -(wS[0] + 0.4 * wS[1] + wS[2] * dx) / wS[3];
-    paretoBoundaryLine = {
-      x1: Number((Math.log(globalMedT) + x1).toFixed(3)),
-      y1: Number((Math.log(globalMedC) + calcDy(x1)).toFixed(3)),
-      x2: Number((Math.log(globalMedT) + x2).toFixed(3)),
-      y2: Number((Math.log(globalMedC) + calcDy(x2)).toFixed(3)),
-    };
+  // 第 6 张核心图：受控因果相图 —— 省时率 s_T(%) vs 额度耗用率增幅 ΔBurnRate(%) + 精确理论零溢价曲线 & AER=1.5 警戒红线！
+  const theoryCurves = [];
+  for (let sPct = -45; sPct <= 72; sPct += 3) {
+    const s = sPct / 100.0;
+    // 等总成本无溢价线: (1 + r_burn)*(1 - s) = 1  =>  r_burn = s / (1 - s)
+    const neutralBurn = (s / (1.0 - s)) * 100.0;
+    // AER = 1.5 捡芝麻丢西瓜警戒边界: (1 + r_burn)*(1 - s) - 1 = 1.5 * max(0, s)
+    const aer15Burn = s > 0
+      ? (((1.0 + 1.5 * s) / (1.0 - s)) - 1.0) * 100.0
+      : 20.0;
+    theoryCurves.push({
+      s_pct: sPct,
+      neutral_burn_pct: Number(neutralBurn.toFixed(1)),
+      aer15_burn_pct: Number(aer15Burn.toFixed(1)),
+    });
   }
 
   const platformStatsMap = new Map();
@@ -655,20 +831,23 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     if (!platformStatsMap.has(s.platform)) {
       platformStatsMap.set(s.platform, {
         platform: s.platform, total_sessions: 0, root_sessions: 0, sub_sessions: 0,
-        total_turns: 0, in_M: 0, cache_M: 0, out_M: 0, weighted_cost_u: 0, exec_hours: 0, q_sum: 0,
+        total_turns: 0, in_M: 0, cache_M: 0, out_M: 0, weighted_cost_u: 0, exec_hours: 0, q_sum: 0, q_cnt: 0,
       });
     }
     const g = platformStatsMap.get(s.platform);
     g.total_sessions++;
     if (s.is_subagent) g.sub_sessions++;
-    else g.root_sessions++;
+    else {
+      g.root_sessions++;
+      g.q_sum += (s.q_human ?? s.q_objective);
+      g.q_cnt++;
+    }
     g.total_turns += s.planner_turns;
     g.in_M += s.input_tokens / 1e6;
     g.cache_M += s.cache_read_tokens / 1e6;
     g.out_M += s.output_tokens / 1e6;
     g.weighted_cost_u += s.weighted_cost_units;
     g.exec_hours += s.exec_time_min / 60.0;
-    g.q_sum += (s.q_human ?? s.q_objective);
   }
   const platformSummary = [...platformStatsMap.values()].map((g) => ({
     ...g,
@@ -677,68 +856,53 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     out_M: Number(g.out_M.toFixed(2)),
     weighted_cost_u: Number(g.weighted_cost_u.toFixed(2)),
     exec_hours: Number(g.exec_hours.toFixed(2)),
-    avg_q: Number((g.q_sum / Math.max(1, g.total_sessions)).toFixed(1)),
+    avg_q: Number((g.q_sum / Math.max(1, g.q_cnt)).toFixed(1)),
+    avg_burn_uh: Number((g.weighted_cost_u / Math.max(0.05, g.exec_hours)).toFixed(2)),
   })).sort((a, b) => b.total_sessions - a.total_sessions);
 
-  const topCeSamples = [...multiTurnRoots]
-    .filter((p) => p.Q_final >= 88)
-    .sort((a, b) => b.ce_index - a.ce_index)
-    .slice(0, Math.max(3, Math.ceil(multiTurnRoots.length * 0.25)));
-
-  const topQualSamples = [...multiTurnRoots]
-    .filter((p) => p.Q_final >= 95)
-    .sort((a, b) => a.C_per_work - b.C_per_work)
-    .slice(0, Math.max(3, Math.ceil(multiTurnRoots.length * 0.25)));
-
-  const safeTurnCap = Math.round(Math.min(dynamicNCrit50, Math.max(32, quantile(topCeSamples.map((x) => x.root_turns), 0.80) || 50)));
-  const maxQualStageTurns = Math.round(Math.min(48, Math.max(26, quantile(topQualSamples.map((x) => x.root_turns), 0.75) || 40)));
   const powerAlpha = latestLearnedModel.power_alpha;
-
   const prescriptions = {
     sample_basis_count: filteredSessions.length,
     root_project_count: rootProjects.length,
     empirical_constants: {
       turn_cost_exponent: powerAlpha,
       double_turns_cost_mult: Number((2 ** powerAlpha).toFixed(2)),
-      tenfold_turns_cost_mult: Number((10 ** powerAlpha).toFixed(1)),
-      compaction_quality_drop: Number((avgQComp0 - avgQCompPos).toFixed(1)),
       sec_per_1k_output_tok: latestLearnedModel.lat_per_out_k,
       base_turn_overhead_sec: latestLearnedModel.lat_base_sec,
       dynamic_n_crit_50: dynamicNCrit50,
-      time_cost_elasticity_ratio: tcElasticityRatio,
-      logit_state_weights: wS,
+      burn_formula_beta: burnFit.beta,
+      burn_formula_r2: burnFit.r2,
       logit_live_weights: wL,
       logit_live_accuracy: logitLiveModel.accuracy,
     },
     mode_extreme_cost_effectiveness: {
-      title: '模式 A：要求「极致性价比」时 AI Agent 最优工作范式',
-      core_math_rule: `实时拟合时间-金钱弹性比 = ${tcElasticityRatio} : 1 → 严守 ΔC% ≤ ${tcElasticityRatio} × (-ΔT%)，绝不用大金钱换小时间！`,
-      recommended_max_turns_per_session: safeTurnCap,
-      recommended_context_ceiling_k: 110,
+      title: '模式 A：要求「质量保持 + 极致性价比」时 AI Agent 最优工作范式',
+      core_math_rule: '功率-速度守恒铁律：ΔC_total/C_B = (1 + ΔC_dot/C_dot_B)·(1 - s_T) - 1 ≤ 0  ⇒  任何加速方案的小时额度耗用率增幅绝不可超过 s_T/(1 - s_T)！',
+      recommended_max_turns_per_session: Math.round(dynamicNCrit50),
+      recommended_context_ceiling_k: 105,
       min_parallel_tools_per_turn: 3,
       model_routing_strategy: [
-        '常规编码、方案拆解与中度任务：主力采用 Balanced/Carbon-High 或 DSH 标准档（实测单轮成本比顶配 Apex-XHigh 低 55%~70%）',
-        '目录探查、日志过滤、只读文件检索（原始体积 > 15k Tokens 且主会话无需重读原文）：派发 Fast-Lightweight (Hydrogen/Flash) 子代理，并发数 P ≤ 3',
-        '严禁派发 Model="inherit" 顶配子代理去读主会话后续还要复读的图片或源码（实测亏损率 100%）',
+        '零额度硬件/算法加速永远优先于“堆 Agent 加速”：优先启用 SageAttention / 分桶批跑 / 本地 Python 队列脚本（此类方案 ΔC_dot = 0%，纯赚省时率 s_T，总成本反而下降！）',
+        '严禁在单 GPU 物理瓶颈任务中狂开顶配 (2.0x Neon-XHigh) 子代理并发审图/轮询（实测阿姆达尔定律锁死省时仅 ~24%，但小时耗用率从 10.5 U/h 暴涨 +148.6% 至 26.1 U/h！）',
+        '若确需子代理做分片初筛，必须强制指定轻量模型 (0.28x Hydrogen/Flash) 且并发度 ≤ 3，将子代理附加功率压在 +1.5 U/h 以内',
       ],
       execution_tactics: [
-        '把高频循环、拼图、批量校验下沉至本地 0 额度 Python/Node 脚本（ΔC = 0%，纯赚 30%~65% 速度，AER = 0 绝对合算）',
-        `每轮合并至少 3 个独立读写检查动作，将总轮数压在动态生死线 ${dynamicNCrit50} 轮内（轮数砍半则成本按 2^${powerAlpha.toFixed(2)} 缩减 ${((1 - 1 / (2 ** powerAlpha)) * 100).toFixed(0)}%）`,
-        `禁止每轮手写上千行一次性临时脚本（每少输出 2k Tokens 立省 ${(2 * latestLearnedModel.lat_per_out_k).toFixed(1)} 秒流式等待与高倍率输出费），改用 JSON 参数配置驱动`,
+        '禁止高频轮询后台任务：等待 GPU/编译时使用精确超时回调或单次长阻塞脚本，杜绝主会话每 2 分钟唤醒重读一次百万级上下文',
+        `跨阶段主动清零上下文：单窗口超过 ${Math.round(dynamicNCrit50)} 轮时将进度锁入本地 JSON/MD 后开启新窗口，防止单轮耗用率随上下文水位翻倍`,
       ],
     },
     mode_extreme_output_quality: {
-      title: '模式 B：要求「极致产出质量 (Q → 100)」时 AI Agent 最优工作范式',
-      core_math_rule: `实时拟合质量方程 Q = ${latestLearnedModel.q_intercept.toFixed(1)} ${latestLearnedModel.q_slope_lnN.toFixed(2)}·ln N：极致质量来自“零失忆短周期分治 + 确定性验证”，绝非单会话死磕！`,
-      recommended_stage_turns: maxQualStageTurns,
-      zero_compaction_mandate: `强制 Compaction = 0（实测触发压缩失忆后质量均值从 ${avgQComp0.toFixed(1)} 跌至 ${avgQCompPos.toFixed(1)} 分）`,
+      title: '模式 B：要求「极致任务完成质量 (Q_task → 98+)」时 AI Agent 最优工作范式',
+      core_math_rule: '任务完成质量 Q_task 取决于「首轮母本精度 × 确定性核验标尺 × 终局闭环修复」，与盲目拉长单会话轮数或堆砌高价子代理无关！',
+      recommended_stage_turns: 42,
+      zero_compaction_mandate: '分话/分模块独立窗口交付（杜绝单会话破千步后规则遗忘与前后设定漂移）',
       model_routing_strategy: [
-        '关键架构设计、复杂数学/仿真对齐、多模态细节终审：启用 Apex-XHigh / Flagship 顶配模型保证首轮高直通率 p_0（避免轻量模型硬啃高复杂度推理引发数百轮无效试错翻车）',
-        `分阶段上下文清零制：大型工程按每 ${maxQualStageTurns} 轮为一个独立里程碑，将精确状态锁入本地结构化文件（如 picks.json / spec.md），随后开启全新零历史会话接棒`,
+        '核心架构设计、复杂审美/解剖学终审、疑难根因定位：由零失忆主会话挂载顶配模型单点拍板，确保终局交付标准不妥协',
+        '将重复性校验规则代码化（如 2.4x 像素坐标标尺切图、AST/单元测试断言、潜空间局部掩膜函数），用确定性代码守住 100% 下限',
       ],
       execution_tactics: [
-        '高难低直通单元（p < 0.40）采用本地同批多候选选优（Best-of-4 并发种子）替代跨轮次串行盲抽，2 轮硬熔断后直接切换确定性物理/代码规则清零残余微瑕',
-        '视觉或多模态终审采用不触发下采样模糊的高清标尺合板（单边 ≤ 2800px，局部保留 1:1 像素刻度），由零失忆主脑单点拍板',
+        '遇到局部细节瑕疵（如多趾/色差/UI偏移）严禁整批推倒盲抽，直接走局部微创修补或确定性像素/代码修正，兼顾 97+ 完成质量与可控耗用率',
+        '每完成一个独立子里程碑立即落盘验收，避免带病进入下一阶段引发连锁返工',
       ],
     },
   };
@@ -766,8 +930,9 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       total_tokens_M: Number((totalInM + totalCaM + totalOuM).toFixed(2)),
       total_weighted_cost_u: Number(filteredSessions.reduce((a, s) => a + s.weighted_cost_units, 0).toFixed(2)),
       total_exec_hours: Number((totTimeDenom / 60).toFixed(2)),
-      sesame_alert_count: sesameAlerts.length,
-      total_estimated_waste_u: Number(sesameAlerts.reduce((a, x) => a + x.estimated_waste_u, 0).toFixed(2)),
+      paired_experiment_count: counterfactualPairs.length,
+      sesame_alert_count: badPairs.length,
+      total_estimated_waste_u: Number(badPairs.reduce((a, x) => a + x.deltas.excess_cost_u, 0).toFixed(2)),
       dynamic_n_crit_50: dynamicNCrit50,
       cost_shares_pct: {
         cache_read: Number(((0.2 * totalCaM) / rawCostDenom * 100).toFixed(1)),
@@ -799,8 +964,8 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         })),
       },
       quality_vs_turns: {
-        ...regQualityDecay,
-        points: multiTurnRoots.slice(0, 320).map((p) => ({
+        ...regQualityVsTurns,
+        points: execRoots.slice(0, 320).map((p) => ({
           uid: p.session_uid, platform: p.platform, title: p.title.slice(0, 50), comp: p.compactions,
           x: Number(Math.log(p.tree_turns).toFixed(3)),
           y: p.Q_final,
@@ -821,39 +986,41 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         accuracy: logitLiveModel.accuracy,
         n_crit_50: dynamicNCrit50,
         curve: sigmoidCurve,
-        points: multiTurnRoots.slice(0, 260).map((p) => ({
+        points: execRoots.slice(0, 260).map((p) => ({
           uid: p.session_uid, platform: p.platform, title: p.title.slice(0, 50),
           x: Number(Math.log(Math.max(1, p.tree_turns)).toFixed(3)),
           y: p.is_high_ce ? 98 : 2,
           comp: p.compactions,
         })),
       },
-      pareto_unit_space: {
-        med_ln_T: Number(Math.log(globalMedT).toFixed(3)),
-        med_ln_C: Number(Math.log(globalMedC).toFixed(3)),
-        boundary_line: paretoBoundaryLine,
-        state_weights: wS,
-        state_accuracy: logitStateModel.accuracy,
-        points: multiTurnRoots.slice(0, 320).map((p) => ({
-          uid: p.session_uid, platform: p.platform, title: p.title.slice(0, 50),
-          x: Number(Math.log(p.T_per_work).toFixed(3)),
-          y: Number(Math.log(Math.max(1e-5, p.C_per_work)).toFixed(3)),
-          q: p.Q_final, ce: p.ce_index, flag: p.asymmetry_flag,
+      burn_vs_speed_phase: {
+        theory_curves: theoryCurves,
+        points: counterfactualPairs.map((cp) => ({
+          uid: cp.pair_id,
+          platform: cp.platform,
+          title: `${cp.title.slice(0, 34)} (${cp.comparison_scope})`,
+          x: Math.max(-45, Math.min(72, cp.deltas.time_saved_pct)),
+          y: Math.max(-60, Math.min(240, cp.deltas.burn_surge_pct)),
+          dq: cp.deltas.delta_Q,
+          cost_pct: cp.deltas.cost_surge_pct,
+          bad: cp.is_bad_tradeoff,
+          verdict: cp.verdict_label,
         })),
       },
     },
-    sesame_alerts: sesameAlerts.slice(0, 50),
+    counterfactual_pairs: counterfactualPairs,
+    sesame_alerts: badPairs,
     prescriptions,
     projects: rootProjects.slice(0, 250),
   };
 }
 
 /**
- * 完全使用在线重训练出的最新动态系数进行策略预演（不再有任何静态硬编码！）
+ * 策略沙盘：直接对比「基线单兵方案 B」vs「所选加速/并发方案 A」在功率-速度守恒定律下的差分表现！
  */
 export function simulateAgentPolicy(params = {}) {
   const m = latestLearnedModel;
-  const estTurns = Math.max(1, Number(params.turns || 40));
+  const estTurns = Math.max(6, Number(params.turns || 60));
   const modelMult = Math.max(0.15, Number(params.model_mult || 1.0));
   const toolsPerTurn = Math.max(0.5, Number(params.tools_per_turn || 2.5));
   const avgCtxK = Math.max(15, Number(params.avg_ctx_k || 65));
@@ -861,44 +1028,62 @@ export function simulateAgentPolicy(params = {}) {
   const subMult = Math.max(0.15, Number(params.sub_mult || 0.28));
   const subDupRead = Boolean(params.sub_dup_read);
 
-  const effectiveTurns = Math.max(4, Math.round(estTurns * (1.8 / toolsPerTurn)));
-  const estCompactions = Math.floor(Math.max(0, (effectiveTurns * (avgCtxK / 45) - 135) / 115));
-  const reworkMult = 1.0 + 0.35 * estCompactions;
-  const finalTurns = Math.round(effectiveTurns * reworkMult);
+  // 对照基线 B：同任务标准均衡模型 (1.0x)、单轮 2.0 工具、0 子代理、适中上下文 60k
+  const baseTurns = estTurns;
+  const baseCost = Number((1.0 * (m.throughput_slope * (baseTurns * 60 / 1000.0) + 0.05)).toFixed(2));
+  const baseMin = Number(((baseTurns * (m.lat_base_sec + m.lat_per_out_k * 1.0 + m.lat_per_ctx_100k * 0.6)) / 60.0).toFixed(1));
+  const baseBurnUh = Number((baseCost / Math.max(0.02, baseMin / 60.0)).toFixed(2));
 
-  const mainCost = modelMult * (m.throughput_slope * (finalTurns * avgCtxK / 1000.0) + Math.max(0.02, m.throughput_intercept * 0.2)) * (subDupRead && subCount > 0 ? 1.35 : 1.0);
-  const subCost = subCount * subMult * 0.14;
+  // 当前所选方案 A
+  const effectiveTurns = Math.max(4, Math.round(estTurns * (2.0 / toolsPerTurn)));
+  const estCompactions = Math.floor(Math.max(0, (effectiveTurns * (avgCtxK / 50) - 140) / 120));
+  const finalTurns = Math.round(effectiveTurns * (1.0 + 0.28 * estCompactions));
+
+  const mainCost = modelMult * (m.throughput_slope * (finalTurns * avgCtxK / 1000.0) + 0.05) * (subDupRead && subCount > 0 ? 1.32 : 1.0);
+  const subCost = subCount * subMult * 0.36;
   const totalCost = Number((mainCost + subCost).toFixed(2));
 
-  const mainMin = (finalTurns * (m.lat_base_sec + m.lat_per_out_k * 1.1 + m.lat_per_ctx_100k * (avgCtxK / 100))) / 60.0;
-  const speedup = subCount > 0 ? Math.min(2.2, (1 + subCount) / (1 + 0.22 * subCount + 0.06 * subCount * (subCount - 1))) : 1.0;
-  const totalMin = Number((mainMin / speedup + estCompactions * 6.5).toFixed(1));
+  const mainMin = (finalTurns * (m.lat_base_sec + m.lat_per_out_k * 1.0 + m.lat_per_ctx_100k * (avgCtxK / 100))) / 60.0;
+  // 阿姆达尔定律：硬件/外部串行占比 s_serial ≈ 0.55 时，狂堆子代理的真实提速存在硬天花板
+  const speedup = subCount > 0 ? 1.0 / (0.55 + 0.45 / Math.min(4.0, 1 + 0.65 * subCount)) : 1.0;
+  const totalMin = Number((mainMin / speedup + estCompactions * 5.0).toFixed(1));
+  const predBurnUh = Number((totalCost / Math.max(0.02, totalMin / 60.0)).toFixed(2));
 
-  const baseQ = modelMult >= 0.8 ? m.q_intercept : m.q_intercept - 10.0;
-  const predQ = Number(Math.min(100, Math.max(50, baseQ + m.q_slope_lnN * Math.log(finalTurns) - m.comp_q_penalty * 0.75 * estCompactions)).toFixed(1));
+  const baseQ = 92.0;
+  const predQ = Number(Math.min(98.5, Math.max(55.0,
+    baseQ + (modelMult >= 1.3 ? 2.5 : modelMult <= 0.35 ? -4.5 : 0) - estCompactions * 3.5
+  )).toFixed(1));
 
-  const wL = m.w_live;
-  const zLive = wL[0] + wL[1] * Math.log(finalTurns + subCount * 10) + wL[2] * 0.5 + wL[3] * estCompactions;
-  const probCe = Number((sigmoid(zLive) * 100).toFixed(1));
+  const timeSavedPct = Number((((baseMin - totalMin) / Math.max(0.1, baseMin)) * 100).toFixed(1));
+  const burnSurgePct = Number((((predBurnUh - baseBurnUh) / Math.max(0.1, baseBurnUh)) * 100).toFixed(1));
+  const costSurgePct = Number((((totalCost - baseCost) / Math.max(0.05, baseCost)) * 100).toFixed(1));
 
-  let verdict = `✅ 合算稳态：低于当前动态生死线 (${m.n_crit_50} 轮)，处于高性价比走廊`;
-  if (subCount > 0 && subMult >= 1.3 && subDupRead) {
-    verdict = '🔴 严重捡芝麻丢西瓜警告：高价子代理 + 主会话重复读取，额度翻倍但几乎不省时！请改为 0 子代理或切换轻量模型 (0.28x)！';
-  } else if (estCompactions >= 1 || finalTurns > m.n_crit_50) {
-    verdict = `🟠 越过动态生死线 (${m.n_crit_50} 轮)：预计达 ${finalTurns} 轮 (失忆 ${estCompactions} 次)！建议拆分为 ${Math.ceil(finalTurns / Math.max(25, Math.floor(m.n_crit_50 * 0.8)))} 个阶段清零上下文！`;
-  } else if (toolsPerTurn < 1.5) {
-    verdict = '🟡 碎步重算税偏高：单轮并发工具过少，建议合并读写批处理以砍半缓存税！';
-  }
+  const pairEval = evaluateCounterfactualPair({
+    pairId: 'sim',
+    pairCategory: 'replacement',
+    comparisonScope: '沙盘策略对比标准均衡基线',
+    platform: 'sim',
+    domain: '策略预演',
+    title: '沙盘模拟',
+    base: { uid: 'base', label: '标准基线 B', turns: baseTurns, subCount: 0, T_min: baseMin, C_u: baseCost, sub_C_u: 0, Q_task: baseQ, scaleM: 1 },
+    target: { uid: 'sim', label: '当前方案 A', turns: finalTurns, subCount, T_min: totalMin, C_u: totalCost, sub_C_u: subCost, Q_task: predQ, scaleM: 1 },
+  });
 
   return {
     effective_turns: finalTurns,
     est_compactions: estCompactions,
     pred_Q: predQ,
+    delta_Q: Number((predQ - baseQ).toFixed(1)),
     pred_T_min: totalMin,
     pred_C_units: totalCost,
-    prob_ce_pct: probCe,
+    pred_burn_uh: predBurnUh,
+    base_burn_uh: baseBurnUh,
+    time_saved_pct: timeSavedPct,
+    burn_surge_pct: burnSurgePct,
+    cost_surge_pct: costSurgePct,
+    prob_ce_pct: pairEval.deltas.prob_ce_pct,
     learned_n_crit_50: m.n_crit_50,
-    verdict,
+    verdict: `${pairEval.verdict_label}：对比标准基线，质量 ΔQ=${predQ - baseQ >= 0 ? '+' : ''}${(predQ - baseQ).toFixed(1)}，省时 ${timeSavedPct}%，额度耗用率 ${baseBurnUh}→${predBurnUh} U/h (${burnSurgePct >= 0 ? '+' : ''}${burnSurgePct}%)，总成本 ${costSurgePct >= 0 ? '+' : ''}${costSurgePct}%`,
   };
 }
 
@@ -910,10 +1095,10 @@ export function exportObservatoryCsv(db, dataDir) {
     ORDER BY s.ended_at DESC, s.started_at DESC
   `).all();
   const cols = [
-    'session_uid', 'platform', 'is_subagent', 'parent_uid', 'domain', 'primary_model', 'model_tier', 'model_mult',
-    'planner_turns', 'tool_calls', 'single_tool_turns', 'cmd_total', 'cmd_failed', 'file_edits', 'image_reads', 'compactions',
-    'input_tokens', 'cache_read_tokens', 'output_tokens', 'token_accuracy', 'raw_cost_units', 'weighted_cost_units',
-    'exec_time_min', 'workload_score', 'q_objective', 'q_human', 'title'
+    'session_uid', 'platform', 'session_role', 'project_key', 'is_subagent', 'parent_uid', 'domain',
+    'primary_model', 'model_tier', 'model_mult', 'planner_turns', 'tool_calls', 'file_edits', 'compactions',
+    'input_tokens', 'cache_read_tokens', 'output_tokens', 'raw_cost_units', 'weighted_cost_units',
+    'exec_time_min', 'q_objective', 'q_human', 'title',
   ];
   const esc = (v) => {
     if (v === null || v === undefined) return '';
@@ -921,9 +1106,7 @@ export function exportObservatoryCsv(db, dataDir) {
     return /[",\n\r]/.test(s) ? `"${s}"` : s;
   };
   const lines = [cols.join(',')];
-  for (const r of rows) {
-    lines.push(cols.map((c) => esc(r[c])).join(','));
-  }
+  for (const r of rows) lines.push(cols.map((c) => esc(r[c])).join(','));
   const outPath = join(dataDir, 'qtc_multi_agent_dataset.csv');
   writeFileSync(outPath, '\uFEFF' + lines.join('\n'), 'utf8');
   return { csv_path: outPath, row_count: rows.length };

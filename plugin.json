@@ -1,8 +1,8 @@
 {
   "name": "qtc-observatory",
   "displayName": "QTC Observatory（跨Agent实时任务监测与自修正研究台）",
-  "description": "100% 零干扰旁路实时监测本地所有 AI Agent（Antigravity / DSH / Claude Code / Codex / 自定义 Agent）的质量(Q)、时间(T)与金钱额度(C)；内置 fs.watch 秒级流式捕获、在线 IRLS/OLS 模型自修正引擎、SSE 热推 6 大回归图与“捡芝麻丢西瓜”抓捕器。",
-  "version": "1.1.0",
+  "description": "100% 零干扰旁路实时监测本地所有 AI Agent 的任务完成质量(Q_task)、时间成本(T)与额度耗用率(C_dot)；基于受控基线-实验因果差分框架与功率-速度守恒定律，精准抓捕“时间没省多少、额度耗用率剧增”的捡芝麻丢西瓜与降质行为。",
+  "version": "1.2.0",
   "license": "MIT",
   "repository": "https://github.com/tcbhls/qtc-observatory",
   "logo": "assets/logo.svg",
