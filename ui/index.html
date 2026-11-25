@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>QTC 跨Agent任务监测与性价比研究台</title>
+  <title>QTC 跨Agent实时任务监测与自修正研究台 v1.1</title>
   <style>/*__INLINE_CSS__*/</style>
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
-        <span class="badge-zero">● 零干扰只读旁路监测 (0 Prompt注入)</span>
-        <h1>QTC 跨Agent研究观测台</h1>
+        <span class="badge-zero">● 零干扰只读旁路 (0 Prompt注入)</span>
+        <span id="liveStreamBadge" class="badge-live">⚡ 正在连接实时流...</span>
+        <h1>QTC 跨Agent实时研究观测台 <small style="font-size:11px;color:#94a3b8;font-weight:500">v1.1 Online-IRLS</small></h1>
       </div>
       <div class="toolbar">
         <select id="platformFilter" title="按 AI Agent 平台筛选样本">
@@ -22,16 +23,19 @@
           <option value="codex">OpenAI Codex</option>
           <option value="custom">Custom Drop-in</option>
         </select>
-        <button id="btnSync" class="btn primary">立即增量同步</button>
+        <button id="btnSync" class="btn primary">立即强制同步</button>
         <button id="btnExport" class="btn">导出 CSV 样本库</button>
       </div>
     </header>
 
+    <!-- 实时活跃会话跳动脉搏栏 -->
+    <div id="livePulseStrip" class="live-pulse-strip"></div>
+
     <nav class="tabs">
       <button class="tab active" data-tab="overview">1. 跨Agent样本与账单拆解</button>
-      <button class="tab" data-tab="regression">2. 真实散点OLS回归实验室</button>
+      <button class="tab" data-tab="regression">2. 6大实时回归与模型自修正实验室</button>
       <button class="tab" data-tab="sesame">3. “捡芝麻丢西瓜”抓捕榜 <span id="alertCountPill" class="pill-danger">0</span></button>
-      <button class="tab" data-tab="prescribe">4. 极致性价比 vs 极致质量推算</button>
+      <button class="tab" data-tab="prescribe">4. 极致性价比 vs 极致质量动态推算</button>
       <button class="tab" data-tab="samples">5. 样本明细与人工质量校准</button>
     </nav>
 
@@ -76,24 +80,53 @@
         </div>
       </section>
 
-      <!-- TAB 2: 回归实验室 -->
+      <!-- TAB 2: 6大实时回归与在线自修正实验室 -->
       <section id="tab-regression" class="panel">
         <div class="box">
           <div class="reg-header">
             <div>
-              <h3 id="regTitle">真实样本最小二乘 (OLS) 回归分析</h3>
+              <h3 id="regTitle">真实样本在线最小二乘 (OLS) 与极大似然 (IRLS) 实时回归</h3>
               <p id="regFormula" class="formula-bar"></p>
             </div>
-            <div class="reg-selector">
-              <button class="btn sm active" data-reg="power">① ln(C) vs ln(N) 轮数幂律膨胀</button>
-              <button class="btn sm" data-reg="linear">② C vs (μ·N·L) 纯线性计费吞吐</button>
-              <button class="btn sm" data-reg="quality">③ Q vs ln(N) 拖长失忆降质定律</button>
-              <button class="btn sm" data-reg="pareto">④ 单位产出 ln(C/W) vs ln(T/W) 帕累托前沿</button>
+            <div class="chart-export-group">
+              <button id="btnExportChartPng" class="btn sm" title="将当前实时图表导出为 2x 高清 PNG 图片">🖼 导出当前图 PNG</button>
+              <button id="btnExportChartSvg" class="btn sm" title="导出无损矢量 SVG 图表">📐 导出 SVG</button>
             </div>
           </div>
+          <div class="reg-selector" style="margin-bottom:10px">
+            <button class="btn sm active" data-reg="power">① ln(C) vs ln(N) 轮数幂律膨胀</button>
+            <button class="btn sm" data-reg="linear">② C vs (μ·N·L) 纯线性计费吞吐</button>
+            <button class="btn sm" data-reg="quality">③ Q vs ln(N) 拖长失忆降质</button>
+            <button class="btn sm" data-reg="latency">④ t_LLM vs Out_k 单步延迟多元回归</button>
+            <button class="btn sm" data-reg="sigmoid">⑤ P_CE(N) 在线IRLS概率生死线</button>
+            <button class="btn sm" data-reg="pareto">⑥ 帕累托空间 + 实时Logistic分界线</button>
+          </div>
           <div class="chart-stage">
-            <svg id="regSvg" viewBox="0 0 860 400" preserveAspectRatio="xMidYMid meet"></svg>
+            <svg id="regSvg" viewBox="0 0 880 410" preserveAspectRatio="xMidYMid meet"></svg>
             <div id="chartTooltip" class="chart-tooltip hidden"></div>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>📈 数学模型在线自我修正演化记录 (随每一轮新样本入库自动重训练快照)</h3>
+          <p class="sub-note">每当任意 AI Agent 新增会话轮次或人工校准质量得分，引擎立即在线重解 OLS 矩阵与 Newton-Raphson IRLS 方程组，实时更新斜率、弹性比与 50% 概率生死线：</p>
+          <div class="table-scroll" style="max-height:240px">
+            <table class="data-table" id="evolutionTable">
+              <thead>
+                <tr>
+                  <th>快照时间</th>
+                  <th>样本数 n</th>
+                  <th>累计轮数 ∑N</th>
+                  <th>幂律指数 β_power</th>
+                  <th>线性吞吐率 k_lin</th>
+                  <th>质量衰减斜率 β_Q</th>
+                  <th>动态50%生死线 N_50%</th>
+                  <th>时间:金钱弹性比</th>
+                  <th>IRLS分类准确率</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
       </section>
@@ -131,8 +164,8 @@
         </div>
 
         <div class="box">
-          <h3>交互式策略预演计算器 (What-If 事前防亏沙盘)</h3>
-          <p class="sub-note">在派发大任务前拨动下方参数，基于当前样本库回归系数实时预测 (Q, T, C) 与是否会触发“捡芝麻丢西瓜”告警：</p>
+          <h3>交互式策略预演计算器 (100% 驱动于最新在线重训练参数，零硬编码常数)</h3>
+          <p class="sub-note">拨动下方参数，基于当前数据库刚刚在线拟合出的 OLS 吞吐斜率、多元延迟参数与 IRLS Logistic 权重实时推演 (Q, T, C, P_CE)：</p>
           <div class="sim-grid">
             <label>预计基准轮数 N: <strong id="lblSimTurns">60</strong>
               <input type="range" id="simTurns" min="8" max="400" value="60" />
@@ -170,7 +203,7 @@
       <section id="tab-samples" class="panel">
         <div class="box">
           <div class="filter-row">
-            <h3>全机多 AI Agent 项目样本库 (可直接输入真实质量分校准回归模型)</h3>
+            <h3>全机多 AI Agent 项目样本库 (修改真实质量分将立即触发 IRLS 与 OLS 全模型重训)</h3>
             <input type="text" id="searchBox" placeholder="搜索任务关键词、模型或会话ID..." />
           </div>
           <div class="table-scroll">
@@ -184,8 +217,8 @@
                   <th>失忆</th>
                   <th>耗时 T</th>
                   <th>额度 C</th>
-                  <th>性价比 CE</th>
-                  <th>质量分 Q (可手改保存)</th>
+                  <th>性价比 CE / P_CE</th>
+                  <th>质量分 Q (手改即时重训)</th>
                 </tr>
               </thead>
               <tbody></tbody>
