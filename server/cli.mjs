@@ -3,6 +3,7 @@
  * QTC Observatory v1.3.0 — 独立命令行与全天候无头守护进程管理入口
  */
 import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -11,7 +12,10 @@ import { computeObservatoryAnalytics, exportObservatoryCsv } from './analytics.m
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(__dirname, '..');
-const DATA_DIR = join(PLUGIN_ROOT, '.data');
+const HOST_PLUGIN_DATA = join(homedir(), '.gemini', 'antigravity', 'plugin_data', 'qtc-observatory');
+const DATA_DIR = (existsSync(HOST_PLUGIN_DATA) || existsSync(join(homedir(), '.gemini', 'antigravity', 'plugin_data')))
+  ? HOST_PLUGIN_DATA
+  : join(PLUGIN_ROOT, '.data');
 const INDEX_SCRIPT = join(__dirname, 'index.mjs');
 
 const cmd = process.argv[2] || 'report';

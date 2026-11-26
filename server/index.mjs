@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,7 +40,15 @@ function getArg(prefix, fallback) {
   return hit ? hit.slice(prefix.length) : fallback;
 }
 
-const DATA_DIR = getArg('--data_dir=', join(PLUGIN_ROOT, '.data'));
+function resolveDefaultDataDir() {
+  const hostPluginData = join(homedir(), '.gemini', 'antigravity', 'plugin_data', 'qtc-observatory');
+  if (existsSync(hostPluginData) || existsSync(join(homedir(), '.gemini', 'antigravity', 'plugin_data'))) {
+    return hostPluginData;
+  }
+  return join(PLUGIN_ROOT, '.data');
+}
+
+const DATA_DIR = getArg('--data_dir=', resolveDefaultDataDir());
 const WEB_PORT = Number(getArg('--port=', '18765'));
 const IS_DAEMON = process.argv.includes('--daemon');
 
