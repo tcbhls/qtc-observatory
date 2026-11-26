@@ -49,6 +49,25 @@ function rolePill(role) {
   return `<span class="pill pill-good">执行任务</span>`;
 }
 
+function qTierPill(code = 'unverified', label = '无反馈待定') {
+  const safeCode = ['excellent', 'verified', 'unverified', 'flawed', 'failed', 'human'].includes(code) ? code : 'unverified';
+  return `<span class="pill pill-${safeCode}">${escapeHtml(label)}</span>`;
+}
+
+function renderEvidenceChips(qBreakdown) {
+  if (!qBreakdown || !Array.isArray(qBreakdown.items) || !qBreakdown.items.length) {
+    return `<span class="ev-chip ev-zero">基准 ${qBreakdown?.base ?? 62}</span>`;
+  }
+  const baseChip = `<span class="ev-chip ev-zero">基准 ${qBreakdown.base ?? 62}</span>`;
+  const chips = qBreakdown.items.map((it) => {
+    const d = Number(it.delta || 0);
+    const cls = d > 0 ? 'ev-pos' : d < 0 ? 'ev-neg' : 'ev-zero';
+    const dTxt = d > 0 ? ` +${d}` : d < 0 ? ` ${d}` : '';
+    return `<span class="ev-chip ${cls}">${escapeHtml(it.tag)}${dTxt}</span>`;
+  }).join('');
+  return baseChip + chips;
+}
+
 function idChipHtml(uid = '') {
   const full = fullRawId(uid);
   const sh = shortUid(uid);
@@ -588,7 +607,7 @@ function recomputeCustomPair() {
 
   let pillCls = 'pill-good';
   let tag = '正向合算改进';
-  if (dq <= -8 || a.Q_task < 65) { pillCls = 'pill-bad'; tag = '质量失守翻车'; }
+  if (dq <= -8 || a.Q_task < 55 || (b.Q_task >= 75 && a.Q_task < 65)) { pillCls = 'pill-bad'; tag = '质量失守翻车'; }
   else if (costPct > 25 && sPct <= 0) { pillCls = 'pill-bad'; tag = '双输恶化 (未省时且更贵)'; }
   else if (costPct > 25 && sPct > 0 && (costPct / Math.max(1, sPct)) > 1.5) { pillCls = 'pill-warn'; tag = '捡芝麻丢西瓜 (微弱省时·耗用率剧增)'; }
 
@@ -660,6 +679,7 @@ function renderCounterfactualTable(data) {
         </td>
         <td class="num">
           <div style="font-weight:700">${cp.base.Q_task} → ${cp.target.Q_task} 分</div>
+          <div style="font-size:11px;color:var(--fg-muted);margin:2px 0">${escapeHtml(cp.base.q_tier_label || '')} → ${escapeHtml(cp.target.q_tier_label || '')}</div>
           <div class="${qCls}" style="font-size:11.5px;font-weight:600">ΔQ = ${d.delta_Q >= 0 ? '+' : ''}${d.delta_Q} (${qNote})</div>
         </td>
         <td class="num">
@@ -718,15 +738,24 @@ function renderPrescriptions(data) {
 function renderSamplesTable(data) {
   const kw = (document.getElementById('searchBox')?.value || '').trim().toLowerCase();
   const roleVal = document.getElementById('roleFilter')?.value || 'all';
+  const tierVal = document.getElementById('tierFilter')?.value || 'all';
 
   const rows = (data.projects || []).filter((p) => {
     if (roleVal !== 'all' && p.session_role !== roleVal) return false;
+    if (tierVal !== 'all') {
+      if (tierVal === 'flawed') {
+        if (p.q_tier_code !== 'flawed' && p.q_tier_code !== 'failed') return false;
+      } else if (p.q_tier_code !== tierVal) {
+        return false;
+      }
+    }
     if (!kw) return true;
-    return `${p.display_name} ${p.title} ${p.session_uid} ${p.platform} ${p.primary_model} ${p.domain} ${p.project_key}`.toLowerCase().includes(kw);
+    const evTxt = (p.q_breakdown?.items || []).map((x) => x.tag).join(' ');
+    return `${p.display_name} ${p.title} ${p.session_uid} ${p.platform} ${p.primary_model} ${p.domain} ${p.project_key} ${p.q_tier_label} ${evTxt}`.toLowerCase().includes(kw);
   });
 
   const tbody = document.querySelector('#projectsTable tbody');
-  tbody.innerHTML = rows.slice(0, 150).map((p) => {
+  tbody.innerHTML = rows.slice(0, 160).map((p) => {
     const showPreview = p.title && p.title !== p.display_name;
     return `
       <tr>
@@ -743,13 +772,20 @@ function renderSamplesTable(data) {
         <td>${platPill(p.platform)}<div style="margin-top:4px">${rolePill(p.session_role)}</div></td>
         <td><code style="font-size:11px">${escapeHtml(p.primary_model.slice(0, 24))}</code></td>
         <td class="num">${p.root_turns}${p.sub_turns ? ` <span style="color:var(--fg-muted)">+${p.sub_turns} (${p.sub_count}子)</span>` : ''}</td>
-        <td class="num">${p.T_min}m</td>
-        <td class="num"><strong>${p.C_units} U</strong></td>
+        <td class="num"><div>${p.T_min}m</div><div style="margin-top:2px"><strong>${p.C_units} U</strong></div></td>
         <td class="num"><code>${p.burn_uh} U/h</code></td>
-        <td class="num">
-          <div class="q-edit-group">
-            <input type="number" class="q-input" min="0" max="100" step="0.5" value="${p.Q_final}" data-uid="${escapeHtml(p.session_uid)}" />
-            <button class="btn ghost sm btn-save-q" data-uid="${escapeHtml(p.session_uid)}">校准</button>
+        <td>
+          <div class="q-cell-wrap">
+            <div class="q-top-bar">
+              ${qTierPill(p.q_tier_code, p.q_tier_label)}
+              <div class="q-edit-group">
+                <input type="number" class="q-input" min="0" max="100" step="0.5" value="${p.Q_final}" data-uid="${escapeHtml(p.session_uid)}" />
+                <button class="btn ghost sm btn-save-q" data-uid="${escapeHtml(p.session_uid)}">校准</button>
+              </div>
+            </div>
+            <div class="q-evidence-row">
+              ${renderEvidenceChips(p.q_breakdown)}
+            </div>
           </div>
         </td>
       </tr>
@@ -939,6 +975,10 @@ function bindEvents() {
     if (currentData) renderSamplesTable(currentData);
   });
 
+  document.getElementById('tierFilter')?.addEventListener('change', () => {
+    if (currentData) renderSamplesTable(currentData);
+  });
+
   ['simTurns', 'simModel', 'simTools', 'simCtx', 'simSubs', 'simSubMode'].forEach((id) => {
     document.getElementById(id).addEventListener('input', () => updateSimulator());
     document.getElementById(id).addEventListener('change', () => updateSimulator());
@@ -958,7 +998,7 @@ async function boot() {
   }
 
   try {
-    mcpApp = new App({ name: 'QTC Observatory', version: '1.3.0' }, {});
+    mcpApp = new App({ name: 'QTC Observatory', version: '1.4.0' }, {});
     mcpApp.ontoolresult = (result) => {
       if (result?.structuredContent?.kpis) renderAll(result.structuredContent);
     };

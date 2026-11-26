@@ -308,7 +308,7 @@ if (IS_DAEMON) {
 
   const server = new McpServer({
     name: 'qtc-observatory',
-    version: '1.3.0',
+    version: '1.4.0',
   });
 
   registerAppResource(

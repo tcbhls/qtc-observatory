@@ -23,10 +23,16 @@ if (cmd === 'sync' || cmd === 'report') {
   const dash = computeObservatoryAnalytics(db, 'all');
 
   console.log('========================================================================');
-  console.log(' QTC 观测中心 v1.3.0 — 实时对话名称同步与受控因果对照快照');
+  console.log(' QTC 观测中心 v1.4.0 — 五维证据累积型质量评分与受控因果对照快照');
   console.log('========================================================================');
-  console.log(`[增量采集] 扫描日志: ${syncRes.scanned_files} | 新增/改名/更新: ${syncRes.updated_sessions} | 耗时: ${syncRes.elapsed_ms}ms`);
+  console.log(`[增量采集] 扫描日志: ${syncRes.scanned_files} | 新增/改名/重评: ${syncRes.updated_sessions} | 耗时: ${syncRes.elapsed_ms}ms`);
   console.log(`[总样本池] 总收录会话: ${dash.kpis.total_sessions} 个 (主对话: ${dash.kpis.root_projects}, 子代理: ${dash.kpis.subagent_sessions}) | 受控对照: ${dash.kpis.paired_experiment_count} 组`);
+
+  const tierCounts = {};
+  for (const p of dash.projects) {
+    tierCounts[p.q_tier_label] = (tierCounts[p.q_tier_label] || 0) + 1;
+  }
+  console.log(`[质量分层] ${Object.entries(tierCounts).map(([k, v]) => `${k}: ${v}个`).join(' | ')}`);
 
   console.log('\n--- 1. 正在活跃对话脉搏 (实时显示最新对话名 + #短编号) ---');
   for (const s of dash.live_active_sessions) {

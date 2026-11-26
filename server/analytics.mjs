@@ -15,6 +15,22 @@
  */
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { classifyQualityTier } from './collector.mjs';
+
+function parseBreakdownSafe(rawJson, fallbackScore = 62.0, hasHuman = false) {
+  let obj = null;
+  if (rawJson && typeof rawJson === 'string') {
+    try { obj = JSON.parse(rawJson); } catch {}
+  }
+  const tier = classifyQualityTier(fallbackScore, hasHuman);
+  const items = Array.isArray(obj?.items) ? obj.items : [];
+  return {
+    base: Number(obj?.base ?? 62.0),
+    tier_code: tier.code,
+    tier_label: tier.label,
+    items,
+  };
+}
 
 function quantile(arr, q) {
   if (!arr.length) return 0;
@@ -276,10 +292,10 @@ export function evaluateCounterfactualPair({
   const neutralBurnPct = sFrac > 0 ? (sFrac / (1.0 - sFrac)) * 100.0 : 0.0;
 
   // 等质量硬门控性价比概率 P_CE(A | B)
-  // 1) 任务完成质量绝对达标门控: Q_A >= 80
-  // 2) 任务完成质量不退步门控: ΔQ >= -3.0
+  // 1) 任务完成质量绝对达标门控: Q_A >= 76 (五维准则下通过独立验证的门槛)
+  // 2) 任务完成质量不退步门控: ΔQ >= -3.5
   // 3) 耗用率-提速守恒核: 惩罚超出零溢价曲线的额外耗用率暴涨
-  const gateAbsQ = sigmoid((target.Q_task - 76.0) / 4.5);
+  const gateAbsQ = sigmoid((target.Q_task - 72.0) / 4.5);
   const gateDeltaQ = sigmoid((deltaQ + 3.5) / 2.2);
   const excessCostLog = Math.log(Math.max(0.05, unitCostA / Math.max(1e-5, unitCostB)));
   const speedGainLog = Math.log(Math.max(0.05, unitTimeB / Math.max(1e-4, unitTimeA)));
@@ -297,7 +313,7 @@ export function evaluateCounterfactualPair({
   let verdictLabel = '🟢 正向合算优化';
   const reasons = [];
 
-  if (deltaQ <= -8.0 || target.Q_task < 65.0) {
+  if (deltaQ <= -8.0 || target.Q_task < 55.0 || (base.Q_task >= 75.0 && target.Q_task < 65.0)) {
     verdictCode = 'quality-collapse';
     verdictLabel = '🔴 质量失守翻车 (任务完成质量下降)';
     reasons.push(`任务完成质量从 ${base.Q_task} 分跌至 ${target.Q_task} 分 (ΔQ = ${deltaQ.toFixed(1)})，违背质量保持前提`);
@@ -363,6 +379,8 @@ export function evaluateCounterfactualPair({
       C_u: Number(base.C_u.toFixed(2)),
       burn_uh: Number(burnB.toFixed(2)),
       Q_task: Number(base.Q_task.toFixed(1)),
+      q_tier_code: base.q_tier_code || classifyQualityTier(base.Q_task).code,
+      q_tier_label: base.q_tier_label || classifyQualityTier(base.Q_task).label,
     },
     target: {
       uid: target.uid,
@@ -374,6 +392,8 @@ export function evaluateCounterfactualPair({
       C_u: Number(target.C_u.toFixed(2)),
       burn_uh: Number(burnA.toFixed(2)),
       Q_task: Number(target.Q_task.toFixed(1)),
+      q_tier_code: target.q_tier_code || classifyQualityTier(target.Q_task).code,
+      q_tier_label: target.q_tier_label || classifyQualityTier(target.Q_task).label,
     },
     deltas: {
       delta_Q: Number(deltaQ.toFixed(1)),
@@ -527,7 +547,9 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
 
     const execMin = Math.max(0.15, r.exec_time_min);
     const burnRateUh = treeCost / Math.max(0.02, execMin / 60.0);
-    const qTask = r.q_human !== null && r.q_human !== undefined ? Number(r.q_human) : Number(r.q_objective);
+    const hasHuman = r.q_human !== null && r.q_human !== undefined;
+    const qTask = hasHuman ? Number(r.q_human) : Number(r.q_objective);
+    const qMeta = parseBreakdownSafe(r.q_breakdown, qTask, hasHuman);
 
     rootProjects.push({
       session_uid: r.session_uid,
@@ -562,6 +584,9 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       Q_obj: r.q_objective,
       Q_human: r.q_human,
       Q_final: Number(qTask.toFixed(1)),
+      q_tier_code: qMeta.tier_code,
+      q_tier_label: qMeta.tier_label,
+      q_breakdown: qMeta,
     });
   }
 
@@ -736,10 +761,10 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     const medBurn = Math.max(1.0, quantile(domBurns, 0.50));
     const burnRatio = p.burn_uh / medBurn;
     p.rel_burn_ratio = Number(burnRatio.toFixed(2));
-    // 任务完成质量门控性价比指数：高完成质量且不盲目拉爆小时额度功率
-    const qGate = p.Q_final >= 80 ? (p.Q_final / 100.0) ** 2 : (p.Q_final / 100.0) ** 4;
+    // 任务完成质量门控性价比指数：高完成质量 (通过验证 >=76 分) 且不盲目拉爆小时额度功率
+    const qGate = p.Q_final >= 76.0 ? (p.Q_final / 100.0) ** 2 : (p.Q_final / 100.0) ** 4;
     p.ce_index = Number((qGate / Math.sqrt(Math.max(0.15, burnRatio))).toFixed(2));
-    p.is_high_ce = (p.Q_final >= 88.0 && burnRatio <= 1.25) ? 1 : 0;
+    p.is_high_ce = (p.Q_final >= 76.0 && burnRatio <= 1.25) ? 1 : 0;
   }
 
   const XLive = execRoots.map((p) => [
@@ -1071,9 +1096,9 @@ export function simulateAgentPolicy(params = {}) {
   const totalMin = Number((mainMin / speedup + estCompactions * 5.0).toFixed(1));
   const predBurnUh = Number((totalCost / Math.max(0.02, totalMin / 60.0)).toFixed(2));
 
-  const baseQ = 92.0;
-  const predQ = Number(Math.min(98.5, Math.max(55.0,
-    baseQ + (modelMult >= 1.3 ? 2.5 : modelMult <= 0.35 ? -4.5 : 0) - estCompactions * 3.5
+  const baseQ = 84.0;
+  const predQ = Number(Math.min(97.5, Math.max(48.0,
+    baseQ + (modelMult >= 1.3 ? 4.0 : modelMult <= 0.35 ? -6.5 : 0) - estCompactions * 4.5
   )).toFixed(1));
 
   const timeSavedPct = Number((((baseMin - totalMin) / Math.max(0.1, baseMin)) * 100).toFixed(1));
@@ -1120,7 +1145,7 @@ export function exportObservatoryCsv(db, dataDir) {
     'session_uid', 'display_name', 'platform', 'session_role', 'project_key', 'is_subagent', 'parent_uid', 'domain',
     'primary_model', 'model_tier', 'model_mult', 'planner_turns', 'tool_calls', 'file_edits', 'compactions',
     'input_tokens', 'cache_read_tokens', 'output_tokens', 'raw_cost_units', 'weighted_cost_units',
-    'exec_time_min', 'q_objective', 'q_human', 'title',
+    'exec_time_min', 'q_objective', 'q_human', 'q_tier', 'q_evidence', 'title',
   ];
   const esc = (v) => {
     if (v === null || v === undefined) return '';
@@ -1128,7 +1153,14 @@ export function exportObservatoryCsv(db, dataDir) {
     return /[",\n\r]/.test(s) ? `"${s}"` : s;
   };
   const lines = [cols.join(',')];
-  for (const r of rows) lines.push(cols.map((c) => esc(r[c])).join(','));
+  for (const r of rows) {
+    const hasH = r.q_human !== null && r.q_human !== undefined;
+    const qVal = hasH ? Number(r.q_human) : Number(r.q_objective);
+    const meta = parseBreakdownSafe(r.q_breakdown, qVal, hasH);
+    const evStr = meta.items.map((it) => `${it.tag}(${it.delta >= 0 ? '+' : ''}${it.delta})`).join(' | ');
+    const aug = { ...r, q_tier: meta.tier_label, q_evidence: evStr };
+    lines.push(cols.map((c) => esc(aug[c])).join(','));
+  }
   const outPath = join(dataDir, 'qtc_multi_agent_dataset.csv');
   writeFileSync(outPath, '\uFEFF' + lines.join('\n'), 'utf8');
   return { csv_path: outPath, row_count: rows.length };

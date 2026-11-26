@@ -18,7 +18,7 @@
         </div>
         <div class="brand-title-wrap">
           <h1>QTC 观测中心</h1>
-          <span class="ver-tag">v1.3</span>
+          <span class="ver-tag">v1.4</span>
         </div>
         <span class="divider-v"></span>
         <div id="liveStreamBadge" class="live-status" title="只读旁路监听中：0 Prompt 注入、0 执行拦截，改名或新增步进均秒级同步">
@@ -280,34 +280,70 @@
       <!-- TAB 5: 对话样本明细与质量校准 -->
       <section id="tab-samples" class="view-panel">
         <div class="surface-block">
+          <div class="section-head">
+            <h2>任务完成质量 Q_task 五维证据累积评分标准（v1.4）</h2>
+            <p>废除 90 分虚高起评！所有对话统一从 <strong>62.0 分中性待验基准</strong>起步，凭客观核验与下游真实采纳逐项加分，无反馈沉默结案自然停留在 60~66 分待定区：</p>
+          </div>
+          <div class="rubric-strip">
+            <div class="rubric-card">
+              <div class="rb-head"><span class="pill pill-unverified">0. 中性待验基准</span><code>62.0 分</code></div>
+              <div class="rb-desc">单轮无反馈沉默离开默认不送采纳分，严格与真正验通过的好任务拉开 25+ 分差距。</div>
+            </div>
+            <div class="rubric-card">
+              <div class="rb-head"><span class="pill pill-verified">1. 实质交付深度</span><code>0 ~ +8.0</code></div>
+              <div class="rb-desc">纯口头问答 <code>+0</code> · 终端核查 <code>+1.5</code> · 单文件落盘 <code>+3.5</code> · 多文件 <code>+6</code> · 深度工程 <code>+8</code>。</div>
+            </div>
+            <div class="rubric-card">
+              <div class="rb-head"><span class="pill pill-verified">2. 独立客观核验</span><code>-12 ~ +13</code></div>
+              <div class="rb-desc">改后构建/测试全绿 <code>+5.5</code> · 成品视觉自检 <code>+3.5</code> · 计划100%完结 <code>+2.5</code> · 子代理核验 <code>+1.5</code>；改后零验证 <code>-4</code> · 终局报错 <code>-8</code>。</div>
+            </div>
+            <div class="rubric-card">
+              <div class="rb-head"><span class="pill pill-excellent">3. 真实采纳转化</span><code>-5 ~ +14</code></div>
+              <div class="rb-desc">Git/安装包落库 <code>+6</code> · 显式认可/沉淀经验 <code>+5</code> · 多轮顺畅推进 <code>+4</code> · 加星 <code>+3.5</code> · 事后回访复用 <code>+2</code>；归档弃用 <code>-5</code>。</div>
+            </div>
+            <div class="rubric-card">
+              <div class="rb-head"><span class="pill pill-flawed">4. 意图对齐摩擦</span><code>-38 ~ +4</code></div>
+              <div class="rb-desc">多轮一次做对零返工 <code>+4</code>；中途纠偏已闭环 <code>-1.5~-7.5</code>；终局严重偏差未闭环 <code>-18</code>；质量倒退叫停 <code>-34</code>。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="surface-block">
           <div class="section-head split">
             <div>
-              <h2>全机对话样本库与任务完成质量校准</h2>
-              <p>主标题实时同步你在客户端设置的对话名称（点击 <code>#短编号</code> 可复制完整会话 ID；修改完成质量分将立即重训全局模型）。</p>
+              <h2>全机对话样本库与逐项证据明细校准</h2>
+              <p>每条对话透明展示加减分证据标签（点击 <code>#短编号</code> 复制完整 ID；手填校准分拥有最高覆盖权并立即重训全局模型）。</p>
             </div>
             <div class="filter-bar">
+              <select id="tierFilter">
+                <option value="all">全部质量等级</option>
+                <option value="excellent">卓越闭环 (88+)</option>
+                <option value="verified">验证达标 (76~87.9)</option>
+                <option value="unverified">无反馈待定 (60~75.9)</option>
+                <option value="flawed">有瑕待修 / 失败 (&lt;60)</option>
+                <option value="human">已人工校准</option>
+              </select>
               <select id="roleFilter">
                 <option value="all">全部角色</option>
                 <option value="execution">执行任务</option>
                 <option value="advisor">优化顾问</option>
                 <option value="probe">微探针</option>
               </select>
-              <input type="text" id="searchBox" class="search-input" placeholder="搜索对话名称、首句内容、目录或 #编号…" />
+              <input type="text" id="searchBox" class="search-input" placeholder="搜索对话名称、证据标签、目录或 #编号…" />
             </div>
           </div>
 
-          <div class="table-container" style="max-height:540px">
+          <div class="table-container" style="max-height:560px">
             <table class="clean-table" id="projectsTable">
               <thead>
                 <tr>
-                  <th style="min-width:280px">对话名称 &amp; 首句摘要</th>
+                  <th style="min-width:250px">对话名称 &amp; 首句摘要</th>
                   <th>平台 / 角色</th>
                   <th>主力模型</th>
                   <th class="num">轮数 (主+子)</th>
-                  <th class="num">耗时</th>
-                  <th class="num">总额度</th>
+                  <th class="num">耗时 / 总额度</th>
                   <th class="num">耗用率</th>
-                  <th class="num" style="min-width:140px">完成质量 Q_task</th>
+                  <th style="min-width:340px">完成质量 Q_task &amp; 评分证据明细</th>
                 </tr>
               </thead>
               <tbody></tbody>

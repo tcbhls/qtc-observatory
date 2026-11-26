@@ -1,4 +1,4 @@
-// QTC Observatory v1.2.0 — 跨 AI Agent 零干扰只读采集、任务完成质量(Q_task)评估与会话内外因果切片引擎
+// QTC Observatory v1.4.0 — 跨 AI Agent 零干扰只读采集、五维证据累积型任务完成质量(Q_task)评估与因果切片引擎
 // 原生只读采集支持: Antigravity, DeepSeek Harness (DSH .zstd), Claude Code, OpenAI Codex, Custom Drop-in JSONL
 // 严格保证：所有外部日志均以只读方式读取，绝不修改、加锁或干扰任何正在运行的 AI Agent。
 import { DatabaseSync } from 'node:sqlite';
@@ -14,35 +14,43 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 const HOME = homedir();
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 7;
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const WIN_PATH_RE = /(?<![a-zA-Z0-9\\])[c-zC-Z]:\\(?:[^\\/:*?"<>|\r\n]+\\?){1,6}/g;
 const TOOL_TS_RE = /Created At:\s*(\S+)\s+Completed At:\s*(\S+)/;
 
 /**
- * 解析 protobuf pbtxt 中的 title:"..." 字段（兼容原生 UTF-8 与八进制 \346\210\220 / 十六进制转义）
+ * 解析 protobuf pbtxt 中的对话标题与隐式行为标注（archived / starred / pinned / last_user_view_time）
  */
-function parsePbtxtTitle(buf) {
+function parsePbtxtAnnotation(buf) {
   const rawStr = buf.toString('utf8');
+  let title = '';
   const m = /title:\s*"((?:[^"\\]|\\.)*)"/.exec(rawStr);
-  if (!m) return '';
-  let inner = m[1];
-  if (/\\[0-7]{3}/.test(inner)) {
-    inner = inner.replace(/((?:\\[0-7]{3})+)/g, (seq) => {
-      const bytes = seq.split('\\').filter(Boolean).map((oct) => parseInt(oct, 8));
-      return Buffer.from(bytes).toString('utf8');
-    });
+  if (m) {
+    let inner = m[1];
+    if (/\\[0-7]{3}/.test(inner)) {
+      inner = inner.replace(/((?:\\[0-7]{3})+)/g, (seq) => {
+        const bytes = seq.split('\\').filter(Boolean).map((oct) => parseInt(oct, 8));
+        return Buffer.from(bytes).toString('utf8');
+      });
+    }
+    title = inner.replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\\\\/g, '\\').trim();
   }
-  return inner.replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\\\\/g, '\\').trim();
+  const compact = rawStr.replace(/\s+/g, '');
+  const archived = compact.includes('archived:true');
+  const starred = compact.includes('starred:true') || compact.includes('pinned:true');
+  const vm = /last_user_view_time:\{seconds:(\d+)/.exec(compact);
+  const lastViewSec = vm ? Number(vm[1]) : 0;
+  return { title, archived, starred, lastViewSec };
 }
 
 /**
- * 毫秒级只读拉取全平台最新「用户自定义对话名称 / 侧栏实时标题」
+ * 毫秒级只读拉取全平台最新「用户自定义对话名称 / 侧栏实时标题 / 归档加星回访信号」
  * 优先级：用户手动重命名 (annotations/*.pbtxt | session_index.jsonl) > 客户端自动摘要标题 (conversation_summaries.db) > 首句提炼
  */
 export function loadLiveExternalTitles() {
-  const titleMap = new Map(); // session_uid -> { displayName, parentUid, agentName, workspacePath }
+  const titleMap = new Map(); // session_uid -> { displayName, parentUid, agentName, workspacePath, archived, starred, lastViewSec, annMtimeMs }
 
   // 1A. Antigravity conversation_summaries.db (只读非锁模式读取侧栏生成标题与子代理角色关系)
   const csDbPath = join(HOME, '.gemini', 'antigravity', 'conversation_summaries.db');
@@ -71,6 +79,10 @@ export function loadLiveExternalTitles() {
           parentUid: r.parent_conversation_id ? `agy:${String(r.parent_conversation_id).toLowerCase()}` : '',
           agentName: String(r.agent_name || '').trim(),
           workspacePath: wsPath,
+          archived: false,
+          starred: false,
+          lastViewSec: 0,
+          annMtimeMs: 0,
         });
       }
     } catch {
@@ -80,7 +92,7 @@ export function loadLiveExternalTitles() {
     }
   }
 
-  // 1B. Antigravity annotations/*.pbtxt (最高优先级：用户手动修改后的最新实时对话名！)
+  // 1B. Antigravity annotations/*.pbtxt (最高优先级：用户手动修改对话名、归档、加星、回访查阅时间！)
   const annDir = join(HOME, '.gemini', 'antigravity', 'annotations');
   if (existsSync(annDir)) {
     try {
@@ -88,12 +100,20 @@ export function loadLiveExternalTitles() {
         if (!fn.endsWith('.pbtxt')) continue;
         const cid = fn.slice(0, -6).toLowerCase();
         const uid = `agy:${cid}`;
-        const customTitle = parsePbtxtTitle(readFileSync(join(annDir, fn)));
-        if (customTitle) {
-          const prev = titleMap.get(uid) || { displayName: '', parentUid: '', agentName: '', workspacePath: '' };
-          prev.displayName = customTitle;
-          titleMap.set(uid, prev);
-        }
+        const fp = join(annDir, fn);
+        let mtime = 0;
+        try { mtime = Math.floor(statSync(fp).mtimeMs); } catch {}
+        const parsed = parsePbtxtAnnotation(readFileSync(fp));
+        const prev = titleMap.get(uid) || {
+          displayName: '', parentUid: '', agentName: '', workspacePath: '',
+          archived: false, starred: false, lastViewSec: 0, annMtimeMs: 0,
+        };
+        if (parsed.title) prev.displayName = parsed.title;
+        prev.archived = parsed.archived;
+        prev.starred = parsed.starred;
+        prev.lastViewSec = parsed.lastViewSec;
+        prev.annMtimeMs = mtime;
+        titleMap.set(uid, prev);
       }
     } catch {}
   }
@@ -108,7 +128,10 @@ export function loadLiveExternalTitles() {
           const o = JSON.parse(ln);
           if (o.id && o.thread_name) {
             const uid = `codex:${String(o.id)}`;
-            const prev = titleMap.get(uid) || { displayName: '', parentUid: '', agentName: '', workspacePath: '' };
+            const prev = titleMap.get(uid) || {
+              displayName: '', parentUid: '', agentName: '', workspacePath: '',
+              archived: false, starred: false, lastViewSec: 0, annMtimeMs: 0,
+            };
             prev.displayName = String(o.thread_name).trim();
             titleMap.set(uid, prev);
           }
@@ -128,7 +151,10 @@ export function loadLiveExternalTitles() {
           const sid = o.sessionId || o.id || basename(fn, '.json');
           const nm = o.title || o.name || o.customTitle || '';
           if (sid && nm) {
-            titleMap.set(`claude:${sid}`, { displayName: String(nm).trim(), parentUid: '', agentName: '', workspacePath: o.cwd || '' });
+            titleMap.set(`claude:${sid}`, {
+              displayName: String(nm).trim(), parentUid: '', agentName: '', workspacePath: o.cwd || '',
+              archived: Boolean(o.archived), starred: Boolean(o.starred), lastViewSec: 0, annMtimeMs: 0,
+            });
           }
         } catch {}
       }
@@ -161,13 +187,21 @@ function buildCleanFallbackName(rawPrompt = '', platform = '', shortId = '') {
 }
 
 // ============================================================================
-// 任务完成质量 (Task Completion Quality, Q_task) 语义与验收证据正则
-// 严格区分「最终任务完成质量」与「过程摩擦(报错重试/上下文压缩)」！
+// 五维证据累积型「任务完成质量 (Q_task)」评估准则 (v1.4.0)
+// 理论依据：AgentSWE (后置确定性核验 vs 空心交付)、SPUR (隐式采纳行为准则)、ACM SIGIR (沉默弃用与有效回访区分)
+// 中性待验基准分 Q_0 = 62.0：无后续反馈与后置验证的沉默结案停留在 60~66 待定区；唯有具备客观核验与下游采纳证据方可进入 85~98 卓越区。
 // ============================================================================
 const ABORT_WORSE_RE = /不要再生成|直接停止|比你?之前.*更差|效果更差|彻底重做|完全不对|全错|根本不能用|白屏|闪退|崩溃/i;
-const STRONG_UNMET_RE = /质量还是不行|没有时间给你改|很生气|大问题|很虚|没什么用|问题很大|违背了.*初衷|预览不了|体验不行|打不开|乱码/i;
-const MID_REFINE_RE = /不对|有问题|有bug|太慢|很慢|很卡|太杂|有点丑|六个脚趾|四只脚趾|好好审核|优化不行|太麻烦|还是找不到|依旧没有|漏了|少了/i;
-const TERMINAL_ACCEPT_RE = /总结.*经验|更新.*经验|归档|开源|同步到.*github|没问题了|不用改了|很棒|完美|搞定|谢谢/i;
+const STRONG_UNMET_RE = /质量还是不行|没有时间给你改|很生气|大问题|很虚|没什么用|问题很大|违背了.*初衷|预览不了|体验不行|打不开|乱码|莫名其妙|太粗糙|太儿戏|没有理解我的意思|没理解.*意思/i;
+const MID_REFINE_RE = /不对|有问题|有bug|卡顿|太杂|有点丑|六个脚趾|四只脚趾|好好审核|优化不行|太麻烦|还是找不到|依旧没有|漏了|少了|重新|再改|不是这个意思|不要只说|先优化|看不清|没生效|为什么还是|还是不对|\[IMAGE_COMMENT\]/i;
+const REPEAT_STUCK_RE = /还是找不到|依旧没有|还是不行|还是有bug|没改好|又出现了|还是报错|依旧报错/i;
+const STRONG_ACCEPT_RE = /总结.*经验|更新.*经验|写进.*经验|沉淀.*规范|开源|同步到.*github|提交到.*github|没问题了|不用改了|很棒|完美|搞定|非常满意/i;
+const POLITE_CLOSE_RE = /^(?:好的|收到|谢谢|多谢|辛苦了|明白|可以了)[！!。.~～\s]*$/i;
+
+// 确定性后置核验与生产落库命令模式（严格匹配真实测试/编译/自检命令，绝不误匹配普通摘要词）
+const VERIFY_CMD_RE = /\b(?:pytest|npm\s+test|npm\s+run\s+build|pnpm\s+build|yarn\s+build|build-ui|esbuild|gradlew|tsc|cargo\s+(?:check|test)|go\s+test|py_compile|vitest|jest|eslint|node\s+--check|agp\.mjs\s+selfcheck)\b/i;
+const SHIP_CMD_RE = /\b(?:git\s+commit|git\s+push|gh\s+repo\s+create|adb\s+install|assembleDebug|assembleRelease|autostart|npm\s+publish)\b/i;
+const MEDIA_EXT_RE = /\.(png|jpg|jpeg|webp|pdf|svg)\b/i;
 
 // 会话内「优化方案注入 / 同型新批次实验对比」触发信号 (严格对称可比实验)
 const EXPLICIT_OPT_SHIFT_RE = /总方案|加速方案|加速引擎|master_plan|fast_engine|优化方案|为这个.*上色|重新上色|换一套方案/i;
@@ -277,79 +311,252 @@ function normalizeProjectKey(cwd = '', candidatePaths = []) {
   return '';
 }
 
+export function classifyQualityTier(score, isHuman = false) {
+  if (isHuman) return { code: 'human', label: '人工校准' };
+  if (score >= 88.0) return { code: 'excellent', label: '卓越闭环' };
+  if (score >= 76.0) return { code: 'verified', label: '验证达标' };
+  if (score >= 60.0) return { code: 'unverified', label: '无反馈待定' };
+  if (score >= 45.0) return { code: 'flawed', label: '有瑕待修' };
+  return { code: 'failed', label: '失败叫停' };
+}
+
 /**
- * 计算真正的「任务完成质量 Q_task (0~100)」
- * 核心数学原则：
- *   - 只评估任务目标的交付达成度、验证闭环度与用户终局验收状态！
- *   - 绝不用中间命令重试次数或上下文压缩次数直接扣减完成质量（那些属于过程成本，已体现在 T 和 C 中）！
+ * 五维贝叶斯证据累积型「任务完成质量 Q_task (0~100)」评估引擎 (v1.4.0)
+ * 中性待验先验 Q_0 = 62.0：
+ *   1. 实质交付深度 (0 ~ +8.0)
+ *   2. 独立客观核验 (-12.0 ~ +13.0)
+ *   3. 真实采纳与下游转化 (-5.0 ~ +14.0)
+ *   4. 意图对齐与纠偏摩擦 (-38.0 ~ +4.0)
+ *   5. 人工校准最高覆盖权 (q_human)
  */
 export function evaluateTaskCompletionQuality({
   userTexts = [],
-  userTimestamps = [],
-  lastPlannerTs = 0,
   plannerTurnsAfterLastNeg = 0,
+  plannerTurnsAfterLastUser = 0,
   fileEdits = 0,
-  toolCalls = 0,
+  outputTokens = 0,
+  cmdTotal = 0,
+  cmdFailed = 0,
   plannerTurns = 0,
   lastCmdSucceeded = true,
+  ranVerifySuiteOk = false,
+  ranCmdAfterEditOk = false,
+  inspectedOutputMedia = false,
+  allStepsDone = false,
+  hasUnfinishedSteps = false,
+  usedSubagentVerify = false,
+  shippedGitOrPkg = false,
+  abruptEnd = false,
+  isActivelyRunning = false,
+  archived = false,
+  starred = false,
+  lastViewSec = 0,
+  endedAtSec = 0,
+  isTrivialProbe = false,
 }) {
-  if (plannerTurns <= 0) return 60.0;
-  const followUps = userTexts.slice(1);
-  let abortCnt = 0;
-  let strongNegCnt = 0;
-  let refineNegCnt = 0;
+  const BASE = 62.0;
+  if (plannerTurns <= 0) {
+    return {
+      score: 58.0,
+      tier_code: 'flawed',
+      tier_label: '有瑕待修',
+      base: BASE,
+      items: [{ dim: 'base', tag: '无有效响应', delta: -4.0 }],
+    };
+  }
 
-  for (const txt of followUps) {
+  let q = BASE;
+  const items = [];
+  const okCmds = Math.max(0, cmdTotal - cmdFailed);
+
+  // ── 维度 1：实质交付深度 (0 ~ +8.0) ────────────────────────────────────────
+  if (fileEdits >= 12 || (fileEdits >= 6 && outputTokens >= 25000)) {
+    q += 8.0;
+    items.push({ dim: 'substance', tag: '深度工程交付', delta: 8.0 });
+  } else if (fileEdits >= 4) {
+    q += 6.0;
+    items.push({ dim: 'substance', tag: '多文件实质交付', delta: 6.0 });
+  } else if (fileEdits >= 1) {
+    q += 3.5;
+    items.push({ dim: 'substance', tag: '实质文件落盘', delta: 3.5 });
+  } else if (!isTrivialProbe && okCmds >= 2 && plannerTurns >= 3) {
+    q += 1.5;
+    items.push({ dim: 'substance', tag: '终端实操核查', delta: 1.5 });
+  } else {
+    items.push({ dim: 'substance', tag: '纯问答无落盘', delta: 0 });
+  }
+
+  // ── 维度 2：独立客观核验闭环 (-12.0 ~ +13.0) ────────────────────────────────
+  let vPts = 0.0;
+  if (ranVerifySuiteOk) {
+    vPts += 5.5;
+    items.push({ dim: 'verify', tag: '构建/测试断言全绿', delta: 5.5 });
+  } else if (ranCmdAfterEditOk) {
+    vPts += 3.5;
+    items.push({ dim: 'verify', tag: '改后实跑验证通过', delta: 3.5 });
+  } else if (fileEdits === 0 && !isTrivialProbe && okCmds >= 2 && lastCmdSucceeded) {
+    vPts += 2.0;
+    items.push({ dim: 'verify', tag: '诊断命令全绿', delta: 2.0 });
+  } else if (fileEdits >= 3 && cmdTotal === 0 && !inspectedOutputMedia && !isActivelyRunning) {
+    vPts -= 4.0;
+    items.push({ dim: 'verify', tag: '改后零验证(空心交付)', delta: -4.0 });
+  }
+
+  if (inspectedOutputMedia) {
+    vPts += 3.5;
+    items.push({ dim: 'verify', tag: '成品视觉/版式自检', delta: 3.5 });
+  }
+  if (allStepsDone) {
+    vPts += 2.5;
+    items.push({ dim: 'verify', tag: '计划清单100%完结', delta: 2.5 });
+  } else if (hasUnfinishedSteps && !isActivelyRunning) {
+    vPts -= 3.5;
+    items.push({ dim: 'verify', tag: '计划步骤半途遗留', delta: -3.5 });
+  }
+  if (usedSubagentVerify && !abruptEnd) {
+    vPts += 1.5;
+    items.push({ dim: 'verify', tag: '子代理交叉核验', delta: 1.5 });
+  }
+  if (!lastCmdSucceeded && cmdTotal > 0 && !isActivelyRunning) {
+    vPts -= 8.0;
+    items.push({ dim: 'verify', tag: '终局命令报错未修', delta: -8.0 });
+  }
+  if (abruptEnd && !isActivelyRunning) {
+    vPts -= 6.0;
+    items.push({ dim: 'verify', tag: '未收口异常中断', delta: -6.0 });
+  }
+  q += Math.max(-12.0, Math.min(13.0, vPts));
+
+  // ── 维度 3：真实采纳与下游转化 (-6.0 ~ +14.0) ──────────────────────────────
+  const followUps = userTexts.slice(1);
+  const lastUserTxt = userTexts.length ? String(userTexts[userTexts.length - 1] || '').trim() : '';
+  const endedWithAbort = userTexts.length > 1 && ABORT_WORSE_RE.test(lastUserTxt);
+  const endedWithStrongNeg = userTexts.length > 1 && STRONG_UNMET_RE.test(lastUserTxt);
+  const endedWithStrongAccept = STRONG_ACCEPT_RE.test(lastUserTxt) && !endedWithAbort && !endedWithStrongNeg;
+  const endedWithPoliteClose = !endedWithStrongAccept && POLITE_CLOSE_RE.test(lastUserTxt);
+
+  // 若会话正在实时运行中，排除当前正在执行的最新一轮用户指令再统计历史跟进
+  const completedFollowUps = (isActivelyRunning && followUps.length > 0 && plannerTurnsAfterLastUser <= 8)
+    ? followUps.slice(0, -1)
+    : followUps;
+
+  let aPts = 0.0;
+  if (shippedGitOrPkg) {
+    aPts += 6.0;
+    items.push({ dim: 'adopt', tag: 'Git/安装包生产落库', delta: 6.0 });
+  }
+  if (endedWithStrongAccept) {
+    aPts += 5.0;
+    items.push({ dim: 'adopt', tag: '终局显式认可/沉淀', delta: 5.0 });
+  } else if (endedWithPoliteClose) {
+    aPts += 2.5;
+    items.push({ dim: 'adopt', tag: '结案致谢确认', delta: 2.5 });
+  }
+  if (starred) {
+    aPts += 3.5;
+    items.push({ dim: 'adopt', tag: '客户端加星/置顶', delta: 3.5 });
+  }
+
+  const constructiveTurns = completedFollowUps.filter(
+    (t) => t && !ABORT_WORSE_RE.test(t) && !STRONG_UNMET_RE.test(t) && !MID_REFINE_RE.test(t)
+  ).length;
+
+  if (!isTrivialProbe && constructiveTurns >= 3) {
+    aPts += 4.0;
+    items.push({ dim: 'adopt', tag: '多轮顺畅下游推进', delta: 4.0 });
+  } else if (!isTrivialProbe && constructiveTurns >= 1) {
+    aPts += 2.0;
+    items.push({ dim: 'adopt', tag: '后续顺畅跟进', delta: 2.0 });
+  } else if (userTexts.length <= 1 && !shippedGitOrPkg && !starred) {
+    items.push({ dim: 'adopt', tag: '单轮无反馈沉默结案', delta: 0 });
+  }
+
+  // 客户端隐式查阅与归档信号
+  if (archived && !shippedGitOrPkg && !endedWithStrongAccept) {
+    aPts -= 5.0;
+    items.push({ dim: 'adopt', tag: '归档弃置未采纳', delta: -5.0 });
+  } else if (!archived && lastViewSec > 0 && endedAtSec > 0) {
+    if (lastViewSec > endedAtSec + 3600) {
+      aPts += 2.0;
+      items.push({ dim: 'adopt', tag: '事后回访查阅复用', delta: 2.0 });
+    } else if (!isActivelyRunning && (Date.now() / 1000 - endedAtSec) > 1800 && lastViewSec < endedAtSec - 90) {
+      aPts -= 3.0;
+      items.push({ dim: 'adopt', tag: '生成完未再查阅', delta: -3.0 });
+    }
+  }
+  q += Math.max(-6.0, Math.min(14.0, aPts));
+
+  // ── 维度 4：需求对齐与纠偏摩擦 (-38.0 ~ +4.0) ──────────────────────────────
+  let abortCnt = 0, strongNegCnt = 0, refineNegCnt = 0, stuckCnt = 0;
+  for (const txt of completedFollowUps) {
     if (ABORT_WORSE_RE.test(txt)) abortCnt++;
     else if (STRONG_UNMET_RE.test(txt)) strongNegCnt++;
     else if (MID_REFINE_RE.test(txt)) refineNegCnt++;
+    if (REPEAT_STUCK_RE.test(txt)) stuckCnt++;
   }
 
-  const lastUserTxt = userTexts.length ? userTexts[userTexts.length - 1] : '';
-  const endedWithAbort = userTexts.length > 1 && ABORT_WORSE_RE.test(lastUserTxt);
-  const endedWithStrongNeg = userTexts.length > 1 && STRONG_UNMET_RE.test(lastUserTxt);
-  const endedWithMidNeg = userTexts.length > 1 && MID_REFINE_RE.test(lastUserTxt);
-  const endedWithAccept = TERMINAL_ACCEPT_RE.test(lastUserTxt) && !endedWithAbort && !endedWithStrongNeg;
+  // 非正在执行中的会话才判定“终局停留在未闭环负向指令”
+  const idleEndedAbort = !isActivelyRunning && endedWithAbort;
+  const idleEndedStrongNeg = !isActivelyRunning && endedWithStrongNeg;
+  const idleEndedMidNeg = !isActivelyRunning && userTexts.length > 1 && MID_REFINE_RE.test(lastUserTxt);
+  const hasClosedLoopFix = plannerTurnsAfterLastNeg >= 5 && (ranCmdAfterEditOk || fileEdits >= 2 || inspectedOutputMedia) && !idleEndedAbort;
 
-  // 判断最后一次负面反馈之后，Agent 是否已经完成了实质性的修复与交付闭环
-  const hasClosedLoopFix = plannerTurnsAfterLastNeg >= 5 && (fileEdits >= 1 || toolCalls >= 6) && !endedWithAbort;
-
-  let q = 90.0;
-  // 实质工程产物落盘与终局验证加分
-  if (fileEdits >= 3) q += 3.5;
-  else if (fileEdits >= 1 || toolCalls >= 5) q += 1.5;
-  if (endedWithAccept) q += 3.5;
-  if (!lastCmdSucceeded && plannerTurns >= 4) q -= 4.0;
-
-  if (endedWithAbort) {
-    // 终局被用户明确叫停或指出“比之前更差劲”（典型质量崩盘未闭环）
-    q = 44.0 - Math.min(12.0, (abortCnt - 1) * 5.0);
-  } else if (endedWithStrongNeg && !hasClosedLoopFix) {
-    // 终局停留在“长图片还是不行，没时间给你改了”或严重不满妥协收尾
-    q = 68.0 - Math.min(14.0, (strongNegCnt - 1) * 4.0);
+  if (idleEndedAbort) {
+    const d = -(34.0 + Math.min(6.0, Math.max(0, abortCnt - 1) * 3.0));
+    q = Math.min(42.0, q + d);
+    items.push({ dim: 'align', tag: '终局质量倒退叫停', delta: d });
+  } else if (idleEndedStrongNeg && !hasClosedLoopFix) {
+    const d = -(18.0 + Math.min(8.0, Math.max(0, strongNegCnt - 1) * 3.0));
+    q = Math.min(56.0, q + d);
+    items.push({ dim: 'align', tag: '终局严重偏差未闭环', delta: d });
   } else {
-    // 正常完成或中途问题已被后续多轮迭代修复闭环
-    if (abortCnt > 0 || strongNegCnt > 0) {
-      if (hasClosedLoopFix || endedWithAccept) {
-        // 中期经历过大改返工，但最终成功交付验收（仅留轻微打磨痕迹）
-        q -= Math.min(6.0, abortCnt * 2.5 + strongNegCnt * 1.5);
-      } else {
-        q -= Math.min(20.0, abortCnt * 8.0 + strongNegCnt * 6.0);
+    if (completedFollowUps.length >= 1 && abortCnt === 0 && strongNegCnt === 0 && refineNegCnt === 0 && fileEdits >= 1) {
+      q += 4.0;
+      items.push({ dim: 'align', tag: '多轮一次对齐零返工', delta: 4.0 });
+    } else {
+      let pen = 0.0;
+      if (abortCnt > 0 || strongNegCnt > 0) {
+        pen += (hasClosedLoopFix || endedWithStrongAccept || shippedGitOrPkg)
+          ? Math.min(7.5, abortCnt * 3.0 + strongNegCnt * 1.8)
+          : Math.min(18.0, abortCnt * 8.0 + strongNegCnt * 6.0);
       }
-    }
-    if (refineNegCnt > 0) {
-      if (endedWithAccept) {
-        q -= Math.min(2.0, refineNegCnt * 0.4);
-      } else if (endedWithMidNeg && plannerTurnsAfterLastNeg < 3) {
-        // 当前最后一轮刚提出细节 bug 尚在修复中
-        q -= Math.min(12.0, 5.0 + refineNegCnt * 1.5);
-      } else {
-        q -= Math.min(5.0, refineNegCnt * 0.9);
+      if (refineNegCnt > 0) {
+        if (endedWithStrongAccept || shippedGitOrPkg) {
+          pen += Math.min(2.5, refineNegCnt * 0.5);
+        } else if (idleEndedMidNeg && plannerTurnsAfterLastNeg < 3) {
+          pen += Math.min(12.0, 5.0 + refineNegCnt * 1.5);
+        } else {
+          pen += Math.min(5.5, refineNegCnt * 1.1);
+        }
+      }
+      if (stuckCnt >= 2) {
+        pen += 3.5;
+        items.push({ dim: 'align', tag: '连续重复卡壳', delta: -3.5 });
+      }
+      if (pen > 0) {
+        const cappedPen = Number(Math.min(22.0, pen).toFixed(1));
+        q -= cappedPen;
+        const closedTag = (hasClosedLoopFix || endedWithStrongAccept || shippedGitOrPkg)
+          ? '中途纠偏已闭环修复'
+          : '多轮返工摩擦';
+        items.push({ dim: 'align', tag: closedTag, delta: -(cappedPen - (stuckCnt >= 2 ? 3.5 : 0)) });
       }
     }
   }
 
-  return Number(Math.max(30.0, Math.min(98.5, q)).toFixed(1));
+  if (isActivelyRunning) {
+    items.push({ dim: 'status', tag: '实时执行中', delta: 0 });
+  }
+
+  const finalScore = Number(Math.max(25.0, Math.min(98.5, q)).toFixed(1));
+  const tier = classifyQualityTier(finalScore, false);
+  return {
+    score: finalScore,
+    tier_code: tier.code,
+    tier_label: tier.label,
+    base: BASE,
+    items: items.map((it) => ({ ...it, delta: Number(Number(it.delta).toFixed(1)) })),
+  };
 }
 
 function parseIsoSec(val) {
@@ -426,7 +633,8 @@ export function openObservatoryDb(dataDir) {
       bg_wait_sec REAL DEFAULT 0,
       exec_time_min REAL DEFAULT 0,
       workload_score REAL DEFAULT 1,
-      q_objective REAL DEFAULT 90,
+      q_objective REAL DEFAULT 62,
+      q_breakdown TEXT DEFAULT '{}',
       source_path TEXT DEFAULT '',
       sub_ref_ids TEXT DEFAULT '[]'
     );
@@ -443,13 +651,15 @@ export function openObservatoryDb(dataDir) {
       b_main_cost_u REAL NOT NULL,
       b_deliverables REAL NOT NULL,
       b_q_task REAL NOT NULL,
+      b_q_breakdown TEXT DEFAULT '{}',
       a_label TEXT NOT NULL,
       a_turns INTEGER NOT NULL,
       a_sub_uids TEXT DEFAULT '[]',
       a_exec_min REAL NOT NULL,
       a_main_cost_u REAL NOT NULL,
       a_deliverables REAL NOT NULL,
-      a_q_task REAL NOT NULL
+      a_q_task REAL NOT NULL,
+      a_q_breakdown TEXT DEFAULT '{}'
     );
 
     CREATE TABLE IF NOT EXISTS human_ratings (
@@ -479,21 +689,23 @@ export function openObservatoryDb(dataDir) {
   if (!cols.has('project_key')) db.exec("ALTER TABLE sessions ADD COLUMN project_key TEXT DEFAULT ''");
   if (!cols.has('linked_uids')) db.exec("ALTER TABLE sessions ADD COLUMN linked_uids TEXT DEFAULT '[]'");
   if (!cols.has('display_name')) db.exec("ALTER TABLE sessions ADD COLUMN display_name TEXT DEFAULT ''");
+  if (!cols.has('q_breakdown')) db.exec("ALTER TABLE sessions ADD COLUMN q_breakdown TEXT DEFAULT '{}'");
+
+  const pCols = new Set(db.prepare('PRAGMA table_info(session_phases)').all().map((c) => c.name));
+  if (!pCols.has('b_q_breakdown')) db.exec("ALTER TABLE session_phases ADD COLUMN b_q_breakdown TEXT DEFAULT '{}'");
+  if (!pCols.has('a_q_breakdown')) db.exec("ALTER TABLE session_phases ADD COLUMN a_q_breakdown TEXT DEFAULT '{}'");
 
   const curVer = db.prepare('PRAGMA user_version').get()?.user_version || 0;
   if (curVer < SCHEMA_VERSION) {
-    db.exec(`
-      DELETE FROM file_watermarks;
-      DELETE FROM session_phases;
-      DELETE FROM model_evolution WHERE 1=1;
-    `);
+    db.exec('DELETE FROM file_watermarks; DELETE FROM session_phases;');
+    try { db.exec('DELETE FROM model_evolution;'); } catch {}
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   }
 
   return db;
 }
 
-function finalizeCommonMetrics(rec, qTaskScore) {
+function finalizeCommonMetrics(rec, qEvalInput) {
   const { tier, mult } = resolveModelPricing(rec.primary_model, rec.platform);
   rec.model_tier = tier;
   rec.model_mult = mult;
@@ -515,7 +727,15 @@ function finalizeCommonMetrics(rec, qTaskScore) {
     Math.max(1.0, 1.0 + 1.25 * rec.file_edits + 0.20 * okCmds + 0.12 * (rec.output_tokens / 1000.0)).toFixed(3)
   );
 
-  rec.q_objective = qTaskScore;
+  if (qEvalInput && typeof qEvalInput === 'object') {
+    rec.q_objective = Number(qEvalInput.score);
+    rec.q_breakdown = JSON.stringify(qEvalInput);
+  } else {
+    const numQ = Number(qEvalInput ?? 62.0);
+    const qt = classifyQualityTier(numQ, false);
+    rec.q_objective = numQ;
+    rec.q_breakdown = JSON.stringify({ score: numQ, tier_code: qt.code, tier_label: qt.label, base: 62.0, items: [] });
+  }
   rec.domain = classifyTaskDomain(`${rec.display_name || ''} ${rec.title || ''}`, `${rec.cwd} ${rec.project_key}`, rec.image_reads);
   if (!rec.display_name) {
     rec.display_name = buildCleanFallbackName(rec.title, rec.platform, rec.raw_id.slice(0, 8));
@@ -551,7 +771,12 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
     if (!clean) continue;
     const turnsBefore = pIndices.filter((k) => k < i).length;
     const turnsAfter = pIndices.filter((k) => k > i).length;
-    if (turnsBefore >= 14 && turnsAfter >= 14 && EXPLICIT_OPT_SHIFT_RE.test(clean)) {
+    if (
+      turnsBefore >= 14 &&
+      turnsAfter >= 14 &&
+      EXPLICIT_OPT_SHIFT_RE.test(clean) &&
+      !/原对话|当时让|阅读这个对话/.test(clean)
+    ) {
       splitStepArrayIdx = i;
       splitKind = /上色/.test(clean) ? '同会话前后两批任务方案对照' : '同任务中途注入加速/优化方案前后对照';
       triggerSummary = clean.replace(/\s+/g, ' ').slice(0, 88);
@@ -569,7 +794,11 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
 
   if (splitStepArrayIdx < 0) return null;
 
-  function summarizeSegment(segSteps) {
+  const fullLastUser = [...sortedSteps].reverse().find((s) => s.type === 'USER_INPUT');
+  const fullLastTxt = String(fullLastUser?.content || '');
+  const parentAccepted = STRONG_ACCEPT_RE.test(fullLastTxt) && !ABORT_WORSE_RE.test(fullLastTxt);
+
+  function summarizeSegment(segSteps, isBaselineHalf = false) {
     // 若最末尾存在隔了 >2 小时仅要求“做总结/归档”的后置收尾轮，只采纳其正向验收信号，不把次日总结时间混入主生产耗时
     let workEnd = segSteps.length;
     for (let j = segSteps.length - 1; j > 5; j--) {
@@ -577,7 +806,7 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
         const tPrev = parseIsoSec(segSteps[j - 1].created_at) || 0;
         const tCur = parseIsoSec(segSteps[j].created_at) || 0;
         const uTxt = String(segSteps[j].content || '');
-        if (tCur - tPrev > 7200 && TERMINAL_ACCEPT_RE.test(uTxt) && !ABORT_WORSE_RE.test(uTxt)) {
+        if (tCur - tPrev > 7200 && STRONG_ACCEPT_RE.test(uTxt) && !ABORT_WORSE_RE.test(uTxt)) {
           workEnd = j;
           break;
         }
@@ -585,14 +814,19 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
     }
 
     let llmSec = 0, syncSec = 0, bgSec = 0;
-    let inW = 0, caW = 0, ouW = 0;
+    let inW = 0, caW = 0, ouW = 0, ouRaw = 0;
     let turns = 0, edits = 0, tools = 0, milestones = 0;
-    let lastCmdOk = true;
+    let cmdTot = 0, cmdFail = 0, lastCmdOk = true;
+    let lastEditIdx = -1, lastProduceIdx = -1;
+    let ranVerifySuiteOk = false, ranCmdAfterEditOk = false, inspectedOutputMedia = false;
+    let allStepsDone = false, hasUnfinishedSteps = false, shippedGitOrPkg = false;
+    let segEndTs = 0;
     const subUids = new Set();
 
     for (let i = 0; i < workEnd; i++) {
       const s = segSteps[i];
       const ts = parseIsoSec(s.created_at);
+      if (ts && ts > segEndTs) segEndTs = ts;
       const nxtTs = i + 1 < workEnd ? parseIsoSec(segSteps[i + 1].created_at) : null;
       const ct = String(s.content || '');
 
@@ -607,15 +841,20 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
           }
         }
         if (ct.includes('Command exited with code ')) {
+          cmdTot++;
           lastCmdOk = ct.includes('Command exited with code 0');
+          if (!lastCmdOk) cmdFail++;
+          else if (lastEditIdx >= 0 && i > lastEditIdx) ranCmdAfterEditOk = true;
         }
       } else if (s.type === 'PLANNER_RESPONSE') {
         turns++;
         const { mult } = resolveModelPricing(s.model || '', 'antigravity');
         const mUse = mult || primaryMult;
+        const outTok = Number(s.output_tokens || 0);
+        ouRaw += outTok;
         inW += Number(s.input_tokens || 0) * mUse;
         caW += Number(s.cache_read_tokens || 0) * mUse;
-        ouW += Number(s.output_tokens || 0) * mUse;
+        ouW += outTok * mUse;
 
         const tcs = Array.isArray(s.tool_calls) ? s.tool_calls : [];
         tools += tcs.length;
@@ -624,7 +863,35 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
         let hasSub = false;
         for (const tc of tcs) {
           const tn = tc.name || tc.tool_name || '';
-          if (tn === 'write_file' || tn === 'edit_file') edits++;
+          const rawArgs = JSON.stringify(tc.args || tc.arguments || '');
+          if (tn === 'write_file' || tn === 'edit_file') {
+            edits++;
+            lastEditIdx = i;
+            lastProduceIdx = i;
+          } else if (tn === 'run_command') {
+            lastProduceIdx = i;
+            const argsObj = tc.args || tc.arguments || {};
+            const cmdLine = String(argsObj.CommandLine || argsObj.command || '');
+            const isVer = lastEditIdx >= 0 && VERIFY_CMD_RE.test(cmdLine);
+            const isShip = SHIP_CMD_RE.test(cmdLine);
+            if (isVer || isShip) {
+              for (let k = i + 1; k < Math.min(workEnd, i + 6); k++) {
+                if (String(segSteps[k].content || '').includes('Command exited with code 0')) {
+                  if (isVer) ranVerifySuiteOk = true;
+                  if (isShip) shippedGitOrPkg = true;
+                  break;
+                }
+              }
+            }
+          } else if (tn === 'read_file' && lastProduceIdx >= 0 && i > lastProduceIdx && MEDIA_EXT_RE.test(rawArgs)) {
+            inspectedOutputMedia = true;
+          } else if (tn === 'update_steps') {
+            const sts = [...rawArgs.matchAll(/"status"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
+            if (sts.length) {
+              allStepsDone = sts.every((x) => x === 'done' || x === 'skipped');
+              hasUnfinishedSteps = sts.some((x) => x === 'in_progress' || x === 'pending' || x === 'failed');
+            }
+          }
           if (tn === 'invoke_subagent' || tn === 'swarm' || tn === 'run_workflow') hasSub = true;
         }
         if (hasSub) {
@@ -646,29 +913,49 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
 
     const uTexts = [];
     let lastNegTs = 0;
+    let lastUserTs = 0;
     for (const s of segSteps) {
       if (s.type === 'USER_INPUT') {
         const ct = String(s.content || '');
         const clean = ct.includes('<USER_REQUEST>')
           ? ct.split('<USER_REQUEST>')[1].split('</USER_REQUEST>')[0].trim() || ct
           : ct;
+        const tsU = parseIsoSec(s.created_at) || 0;
+        if (tsU > lastUserTs) lastUserTs = tsU;
         uTexts.push(clean);
         if (uTexts.length > 1 && (ABORT_WORSE_RE.test(clean) || STRONG_UNMET_RE.test(clean) || MID_REFINE_RE.test(clean))) {
-          lastNegTs = Math.max(lastNegTs, parseIsoSec(s.created_at) || 0);
+          lastNegTs = Math.max(lastNegTs, tsU);
         }
       }
     }
     const turnsAfterNeg = lastNegTs > 0
       ? segSteps.filter((s) => s.type === 'PLANNER_RESPONSE' && (parseIsoSec(s.created_at) || 0) > lastNegTs).length
       : turns;
+    const turnsAfterLastUser = lastUserTs > 0
+      ? segSteps.filter((s) => s.type === 'PLANNER_RESPONSE' && (parseIsoSec(s.created_at) || 0) > lastUserTs).length
+      : turns;
+    const segActive = segEndTs > 0 && (Date.now() / 1000 - segEndTs) < 600;
 
-    const qTask = evaluateTaskCompletionQuality({
+    const qEval = evaluateTaskCompletionQuality({
       userTexts: uTexts,
       plannerTurnsAfterLastNeg: turnsAfterNeg,
+      plannerTurnsAfterLastUser: turnsAfterLastUser,
       fileEdits: edits,
-      toolCalls: tools,
+      outputTokens: ouRaw,
+      cmdTotal: cmdTot,
+      cmdFailed: cmdFail,
       plannerTurns: turns,
       lastCmdSucceeded: lastCmdOk,
+      ranVerifySuiteOk,
+      ranCmdAfterEditOk,
+      inspectedOutputMedia,
+      allStepsDone,
+      hasUnfinishedSteps: isBaselineHalf ? false : hasUnfinishedSteps,
+      usedSubagentVerify: subUids.size > 0,
+      shippedGitOrPkg: shippedGitOrPkg || (isBaselineHalf && parentAccepted && (edits >= 2 || inspectedOutputMedia)),
+      abruptEnd: false,
+      isActivelyRunning: segActive,
+      endedAtSec: segEndTs,
     });
 
     const execMin = Math.max(1.0, (llmSec + syncSec + bgSec) / 60.0);
@@ -681,12 +968,13 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
       execMin: Number(execMin.toFixed(2)),
       mainCostU: Number(mainCostU.toFixed(4)),
       deliverables: Number(deliverables.toFixed(2)),
-      qTask,
+      qTask: qEval.score,
+      qBreakdown: JSON.stringify(qEval),
     };
   }
 
-  const segB = summarizeSegment(sortedSteps.slice(0, splitStepArrayIdx));
-  const segA = summarizeSegment(sortedSteps.slice(splitStepArrayIdx));
+  const segB = summarizeSegment(sortedSteps.slice(0, splitStepArrayIdx), true);
+  const segA = summarizeSegment(sortedSteps.slice(splitStepArrayIdx), false);
   if (segB.execMin < 4.0 || segA.execMin < 4.0 || segB.turns < 10 || segA.turns < 10) return null;
 
   return {
@@ -701,6 +989,7 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
     b_main_cost_u: segB.mainCostU,
     b_deliverables: segB.deliverables,
     b_q_task: segB.qTask,
+    b_q_breakdown: segB.qBreakdown,
     a_label: `优化/切换后实验段 (${segA.turns}轮)`,
     a_turns: segA.turns,
     a_sub_uids: JSON.stringify(segA.subUids),
@@ -708,11 +997,12 @@ function extractAntigravityIntraPhase(sortedSteps, cid, primaryMult) {
     a_main_cost_u: segA.mainCostU,
     a_deliverables: segA.deliverables,
     a_q_task: segA.qTask,
+    a_q_breakdown: segA.qBreakdown,
   };
 }
 
 /** 1. 解析 Antigravity transcript.jsonl */
-function parseAntigravityFile(filePath, cid) {
+function parseAntigravityFile(filePath, cid, extMeta = null) {
   const text = readFileSync(filePath, 'utf8');
   const rawSteps = [];
   for (const line of text.split('\n')) {
@@ -729,7 +1019,10 @@ function parseAntigravityFile(filePath, cid) {
   let llmSec = 0, syncSec = 0, bgSec = 0;
   let firstUser = '', cwd = '', startTs = null, endTs = null;
   let lastCmdOk = true;
-  let lastNegTs = 0;
+  let lastNegTs = 0, lastUserTs = 0;
+  let lastEditIdx = -1, lastProduceIdx = -1;
+  let ranVerifySuiteOk = false, ranCmdAfterEditOk = false, inspectedOutputMedia = false;
+  let allStepsDone = false, hasUnfinishedSteps = false, shippedGitOrPkg = false;
   const ctxArr = [];
   const modelCounts = new Map();
   const subRefIds = new Set();
@@ -754,10 +1047,14 @@ function parseAntigravityFile(filePath, cid) {
       compactions++;
     } else if (st === 'USER_INPUT') {
       userTurns++;
+      if (ts !== null && ts > lastUserTs) lastUserTs = ts;
       if (ct.includes('<ADDITIONAL_METADATA>')) hasHumanMetadata = true;
       let clean = ct;
       if (ct.includes('<USER_REQUEST>')) {
         clean = ct.split('<USER_REQUEST>')[1].split('</USER_REQUEST>')[0].trim();
+      }
+      if (!clean && ct.includes('Comments on the file')) {
+        clean = `[IMAGE_COMMENT] ${ct}`;
       }
       if (!firstUser && clean) firstUser = clean.replace(/\s+/g, ' ').slice(0, 140);
       const evalTxt = clean || ct;
@@ -786,6 +1083,7 @@ function parseAntigravityFile(filePath, cid) {
         cmdTotal++;
         lastCmdOk = ct.includes('Command exited with code 0');
         if (!lastCmdOk) cmdFailed++;
+        else if (lastEditIdx >= 0 && i > lastEditIdx) ranCmdAfterEditOk = true;
       }
     } else if (st === 'PLANNER_RESPONSE') {
       plannerTurns++;
@@ -810,9 +1108,35 @@ function parseAntigravityFile(filePath, cid) {
         const rawArgs = JSON.stringify(tc.args || tc.arguments || '');
         const astr = rawArgs.toLowerCase();
         if (tn === 'read_file' && /\.(png|jpg|jpeg|webp)/.test(astr)) imageReads++;
+        if (tn === 'read_file' && lastProduceIdx >= 0 && i > lastProduceIdx && MEDIA_EXT_RE.test(astr)) {
+          inspectedOutputMedia = true;
+        }
         if (tn === 'write_file' || tn === 'edit_file') {
           fileEdits++;
+          lastEditIdx = i;
+          lastProduceIdx = i;
           for (const mp of (rawArgs.replace(/\\\\/g, '\\').match(WIN_PATH_RE) || [])) pathCandidates.push(mp);
+        } else if (tn === 'run_command') {
+          lastProduceIdx = i;
+          const argsObj = tc.args || tc.arguments || {};
+          const cmdLine = String(argsObj.CommandLine || argsObj.command || '');
+          const isVer = lastEditIdx >= 0 && VERIFY_CMD_RE.test(cmdLine);
+          const isShip = SHIP_CMD_RE.test(cmdLine);
+          if (isVer || isShip) {
+            for (let k = i + 1; k < Math.min(steps.length, i + 6); k++) {
+              if (String(steps[k].content || '').includes('Command exited with code 0')) {
+                if (isVer) ranVerifySuiteOk = true;
+                if (isShip) shippedGitOrPkg = true;
+                break;
+              }
+            }
+          }
+        } else if (tn === 'update_steps') {
+          const sts = [...rawArgs.matchAll(/"status"\s*:\s*"([^"]+)"/g)].map((x) => x[1]);
+          if (sts.length) {
+            allStepsDone = sts.every((x) => x === 'done' || x === 'skipped');
+            hasUnfinishedSteps = sts.some((x) => x === 'in_progress' || x === 'pending' || x === 'failed');
+          }
         }
         if (tn === 'invoke_subagent' || tn === 'swarm' || tn === 'run_workflow') hasSubInvoke = true;
       }
@@ -861,9 +1185,10 @@ function parseAntigravityFile(filePath, cid) {
   }
 
   const isSub = hasHumanMetadata ? 0 : 1;
+  const isTrivialProbe = TRIVIAL_PROBE_RE.test(firstUser);
   let role = isSub ? 'subagent' : 'execution';
   if (!isSub) {
-    if ((plannerTurns <= 6 && fileEdits === 0) || TRIVIAL_PROBE_RE.test(firstUser)) {
+    if ((plannerTurns <= 6 && fileEdits === 0) || isTrivialProbe) {
       role = 'probe';
     } else if (ADVISOR_META_RE.test(firstUser) && linkedUids.size > 0 && imageReads < 10) {
       role = 'advisor';
@@ -873,14 +1198,46 @@ function parseAntigravityFile(filePath, cid) {
   const turnsAfterNeg = lastNegTs > 0
     ? steps.filter((s) => s.type === 'PLANNER_RESPONSE' && (parseIsoSec(s.created_at) || 0) > lastNegTs).length
     : plannerTurns;
+  const turnsAfterLastUser = lastUserTs > 0
+    ? steps.filter((s) => s.type === 'PLANNER_RESPONSE' && (parseIsoSec(s.created_at) || 0) > lastUserTs).length
+    : plannerTurns;
 
-  const qTask = evaluateTaskCompletionQuality({
+  const isActivelyRunning = endTs !== null && (Date.now() / 1000 - endTs) < 600;
+  let lastExecStep = null;
+  for (let k = steps.length - 1; k >= 0; k--) {
+    if (steps[k].type === 'PLANNER_RESPONSE' || steps[k].type === 'GENERIC') {
+      lastExecStep = steps[k];
+      break;
+    }
+  }
+  const abruptEnd = Boolean(
+    lastExecStep && (lastExecStep.type !== 'PLANNER_RESPONSE' || (Array.isArray(lastExecStep.tool_calls) && lastExecStep.tool_calls.length > 0))
+  );
+
+  const qEval = evaluateTaskCompletionQuality({
     userTexts,
     plannerTurnsAfterLastNeg: turnsAfterNeg,
+    plannerTurnsAfterLastUser: turnsAfterLastUser,
     fileEdits,
-    toolCalls,
+    outputTokens: ouSum,
+    cmdTotal,
+    cmdFailed,
     plannerTurns,
     lastCmdSucceeded: lastCmdOk,
+    ranVerifySuiteOk,
+    ranCmdAfterEditOk,
+    inspectedOutputMedia,
+    allStepsDone,
+    hasUnfinishedSteps,
+    usedSubagentVerify: subRefIds.size > 0,
+    shippedGitOrPkg,
+    abruptEnd,
+    isActivelyRunning,
+    archived: Boolean(extMeta?.archived),
+    starred: Boolean(extMeta?.starred),
+    lastViewSec: Number(extMeta?.lastViewSec || 0),
+    endedAtSec: endTs || 0,
+    isTrivialProbe,
   });
 
   const meanCtxK = ctxArr.length ? ctxArr.reduce((a, b) => a + b, 0) / ctxArr.length / 1000 : 0;
@@ -905,6 +1262,7 @@ function parseAntigravityFile(filePath, cid) {
     started_at: startTs || 0,
     ended_at: endTs || 0,
     cwd,
+    display_name: extMeta?.displayName || '',
     title: firstUser || `[Subagent] ${cid.slice(0, 8)}`,
     user_turns: userTurns,
     neg_feedback_turns: negTurns,
@@ -927,7 +1285,7 @@ function parseAntigravityFile(filePath, cid) {
     bg_wait_sec: Number(bgSec.toFixed(2)),
     source_path: filePath,
     sub_ref_ids: JSON.stringify([...subRefIds]),
-  }, qTask);
+  }, qEval);
 
   return { rec, turns, phaseSplit };
 }
@@ -948,7 +1306,10 @@ function parseDshFile(filePath) {
   let cmdTotal = 0, cmdFailed = 0, fileEdits = 0, imageReads = 0, compactions = 0;
   let runningCtxTokens = 0, inSum = 0, caSum = 0, ouSum = 0;
   let exactUsageFound = false, llmSec = 0, syncSec = 0;
-  let startTs = null, endTs = null, lastStepStartSec = null, lastNegTs = 0, lastCmdOk = true;
+  let startTs = null, endTs = null, lastStepStartSec = null, lastNegTs = 0, lastUserTs = 0, lastCmdOk = true;
+  let hasEdited = false, hasProduced = false;
+  let ranVerifySuiteOk = false, ranCmdAfterEditOk = false, inspectedOutputMedia = false;
+  let allStepsDone = false, hasUnfinishedSteps = false, shippedGitOrPkg = false, usedSubagentVerify = false;
   const pendingTools = new Map();
   const stepToolCounter = new Map();
   const ctxArr = [];
@@ -992,6 +1353,7 @@ function parseDshFile(filePath) {
       inSum += tok;
     } else if (tp === 'user/message') {
       userTurns++;
+      if (ts !== null && ts > lastUserTs) lastUserTs = ts;
       const rawStr = JSON.stringify(d.content || d.message || '');
       if (rawStr.includes('image/')) imageReads++;
       const txtMatch = /"text"\s*:\s*"([^"]{2,300})"/.exec(rawStr);
@@ -1053,10 +1415,35 @@ function parseDshFile(filePath) {
       const stepKey = `${d.turn || 0}:${d.step || plannerTurns}`;
       stepToolCounter.set(stepKey, (stepToolCounter.get(stepKey) || 0) + 1);
       const tname = String(d.name || '').toLowerCase();
-      if (tname.includes('write') || tname.includes('edit') || tname.includes('patch')) fileEdits++;
+      const rawArgs = JSON.stringify(d.input || d.arguments || d);
+      if (tname.includes('write') || tname.includes('edit') || tname.includes('patch')) {
+        fileEdits++;
+        hasEdited = true;
+        hasProduced = true;
+      }
+      if ((tname.includes('read') || tname.includes('view')) && hasProduced && MEDIA_EXT_RE.test(rawArgs)) {
+        inspectedOutputMedia = true;
+      }
+      if (tname.includes('task') || tname.includes('subagent') || tname.includes('delegate')) {
+        usedSubagentVerify = true;
+      }
+      if (tname.includes('todo')) {
+        const sts = [...rawArgs.matchAll(/"status"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
+        if (sts.length) {
+          allStepsDone = sts.every((x) => x === 'completed' || x === 'done' || x === 'cancelled');
+          hasUnfinishedSteps = sts.some((x) => x === 'in_progress' || x === 'pending');
+        }
+      }
       if (tname === 'pwsh' || tname === 'bash' || tname.includes('shell') || tname.includes('exec')) {
         cmdTotal++;
-        pendingTools.set(d.callId, { ts, isCmd: true });
+        hasProduced = true;
+        pendingTools.set(d.callId, {
+          ts,
+          isCmd: true,
+          afterEdit: hasEdited,
+          isVer: VERIFY_CMD_RE.test(rawArgs),
+          isShip: SHIP_CMD_RE.test(rawArgs),
+        });
       } else {
         pendingTools.set(d.callId, { ts, isCmd: false });
       }
@@ -1076,6 +1463,11 @@ function parseDshFile(filePath) {
           const failed = /exit code [1-9]|exited with code [1-9]|"isError"\s*:\s*true|ParserError|CommandNotFoundException/i.test(resStr);
           lastCmdOk = !failed;
           if (failed) cmdFailed++;
+          else {
+            if (prev.afterEdit) ranCmdAfterEditOk = true;
+            if (prev.afterEdit && prev.isVer) ranVerifySuiteOk = true;
+            if (prev.isShip) shippedGitOrPkg = true;
+          }
         }
         pendingTools.delete(cidCall);
       }
@@ -1088,18 +1480,35 @@ function parseDshFile(filePath) {
   }
 
   const turnsAfterNeg = lastNegTs > 0 ? plannerTimestamps.filter((t) => t > lastNegTs).length : plannerTurns;
-  const qTask = evaluateTaskCompletionQuality({
+  const turnsAfterLastUser = lastUserTs > 0 ? plannerTimestamps.filter((t) => t > lastUserTs).length : plannerTurns;
+  const isActivelyRunning = endTs !== null && (Date.now() / 1000 - endTs) < 600;
+  const role = isSub ? 'subagent' : (plannerTurns <= 5 && fileEdits === 0 ? 'probe' : 'execution');
+
+  const qEval = evaluateTaskCompletionQuality({
     userTexts,
     plannerTurnsAfterLastNeg: turnsAfterNeg,
+    plannerTurnsAfterLastUser: turnsAfterLastUser,
     fileEdits,
-    toolCalls,
+    outputTokens: ouSum,
+    cmdTotal,
+    cmdFailed,
     plannerTurns,
     lastCmdSucceeded: lastCmdOk,
+    ranVerifySuiteOk,
+    ranCmdAfterEditOk,
+    inspectedOutputMedia,
+    allStepsDone,
+    hasUnfinishedSteps,
+    usedSubagentVerify,
+    shippedGitOrPkg,
+    abruptEnd: pendingTools.size > 0,
+    isActivelyRunning,
+    endedAtSec: endTs || 0,
+    isTrivialProbe: role === 'probe' && TRIVIAL_PROBE_RE.test(userTexts[0] || ''),
   });
 
   const meanCtxK = ctxArr.length ? ctxArr.reduce((a, b) => a + b, 0) / ctxArr.length / 1000 : 0;
   const maxCtxK = ctxArr.length ? Math.max(...ctxArr) / 1000 : 0;
-  const role = isSub ? 'subagent' : (plannerTurns <= 5 && fileEdits === 0 ? 'probe' : 'execution');
 
   const rec = finalizeCommonMetrics({
     session_uid: `dsh:${sessionId}`,
@@ -1136,7 +1545,7 @@ function parseDshFile(filePath) {
     bg_wait_sec: 0,
     source_path: filePath,
     sub_ref_ids: '[]',
-  }, qTask);
+  }, qEval);
 
   return { rec, turns, phaseSplit: null };
 }
@@ -1151,7 +1560,10 @@ function parseClaudeFile(filePath) {
   let userTurns = 0, negTurns = 0, plannerTurns = 0, toolCalls = 0, singleToolTurns = 0;
   let cmdTotal = 0, cmdFailed = 0, fileEdits = 0, imageReads = 0, compactions = 0;
   let inSum = 0, caSum = 0, ouSum = 0, llmSec = 0, syncSec = 0;
-  let startTs = null, endTs = null, prevTs = null, lastNegTs = 0, lastCmdOk = true;
+  let startTs = null, endTs = null, prevTs = null, lastNegTs = 0, lastUserTs = 0, lastCmdOk = true;
+  let hasEdited = false, hasProduced = false, pendingCmdMeta = null;
+  let ranVerifySuiteOk = false, ranCmdAfterEditOk = false, inspectedOutputMedia = false;
+  let allStepsDone = false, hasUnfinishedSteps = false, shippedGitOrPkg = false, usedSubagentVerify = false;
   const ctxArr = [];
   const userTexts = [];
   const plannerTimestamps = [];
@@ -1178,9 +1590,16 @@ function parseClaudeFile(filePath) {
         const failed = /exit code [1-9]|"is_error"\s*:\s*true/i.test(cStr);
         lastCmdOk = !failed;
         if (failed) cmdFailed++;
+        else if (pendingCmdMeta) {
+          if (pendingCmdMeta.afterEdit) ranCmdAfterEditOk = true;
+          if (pendingCmdMeta.afterEdit && pendingCmdMeta.isVer) ranVerifySuiteOk = true;
+          if (pendingCmdMeta.isShip) shippedGitOrPkg = true;
+        }
+        pendingCmdMeta = null;
         if (prevTs !== null && ts !== null && ts - prevTs <= 120 && ts >= prevTs) syncSec += (ts - prevTs);
       } else {
         userTurns++;
+        if (ts !== null && ts > lastUserTs) lastUserTs = ts;
         if (!title && cStr) title = cStr.replace(/\s+/g, ' ').slice(0, 130);
         userTexts.push(cStr);
         if (userTurns > 1 && (ABORT_WORSE_RE.test(cStr) || STRONG_UNMET_RE.test(cStr) || MID_REFINE_RE.test(cStr))) {
@@ -1214,8 +1633,30 @@ function parseClaudeFile(filePath) {
             tInTurn++;
             toolCalls++;
             const tn = String(blk.name || '').toLowerCase();
-            if (tn.includes('bash')) cmdTotal++;
-            if (tn.includes('edit') || tn.includes('write')) fileEdits++;
+            const rawArgs = JSON.stringify(blk.input || '');
+            if (tn.includes('edit') || tn.includes('write')) {
+              fileEdits++;
+              hasEdited = true;
+              hasProduced = true;
+            } else if (tn.includes('bash')) {
+              cmdTotal++;
+              hasProduced = true;
+              pendingCmdMeta = {
+                afterEdit: hasEdited,
+                isVer: VERIFY_CMD_RE.test(rawArgs),
+                isShip: SHIP_CMD_RE.test(rawArgs),
+              };
+            } else if (tn.includes('read') && hasProduced && MEDIA_EXT_RE.test(rawArgs)) {
+              inspectedOutputMedia = true;
+            } else if (tn.includes('task') || tn.includes('agent')) {
+              usedSubagentVerify = true;
+            } else if (tn.includes('todo')) {
+              const sts = [...rawArgs.matchAll(/"status"\s*:\s*"([^"]+)"/g)].map((x) => x[1]);
+              if (sts.length) {
+                allStepsDone = sts.every((x) => x === 'completed' || x === 'done');
+                hasUnfinishedSteps = sts.some((x) => x === 'in_progress' || x === 'pending');
+              }
+            }
           }
         }
         if (tInTurn === 1) singleToolTurns++;
@@ -1244,18 +1685,34 @@ function parseClaudeFile(filePath) {
 
   if (plannerTurns === 0) return null;
   const turnsAfterNeg = lastNegTs > 0 ? plannerTimestamps.filter((t) => t > lastNegTs).length : plannerTurns;
-  const qTask = evaluateTaskCompletionQuality({
+  const turnsAfterLastUser = lastUserTs > 0 ? plannerTimestamps.filter((t) => t > lastUserTs).length : plannerTurns;
+  const isActivelyRunning = endTs !== null && (Date.now() / 1000 - endTs) < 600;
+  const role = isSub ? 'subagent' : (plannerTurns <= 4 && fileEdits === 0 ? 'probe' : 'execution');
+
+  const qEval = evaluateTaskCompletionQuality({
     userTexts,
     plannerTurnsAfterLastNeg: turnsAfterNeg,
+    plannerTurnsAfterLastUser: turnsAfterLastUser,
     fileEdits,
-    toolCalls,
+    outputTokens: ouSum,
+    cmdTotal,
+    cmdFailed,
     plannerTurns,
     lastCmdSucceeded: lastCmdOk,
+    ranVerifySuiteOk,
+    ranCmdAfterEditOk,
+    inspectedOutputMedia,
+    allStepsDone,
+    hasUnfinishedSteps,
+    usedSubagentVerify,
+    shippedGitOrPkg,
+    abruptEnd: Boolean(pendingCmdMeta),
+    isActivelyRunning,
+    endedAtSec: endTs || 0,
   });
 
   const meanCtxK = ctxArr.length ? ctxArr.reduce((a, b) => a + b, 0) / ctxArr.length / 1000 : 0;
   const maxCtxK = ctxArr.length ? Math.max(...ctxArr) / 1000 : 0;
-  const role = isSub ? 'subagent' : (plannerTurns <= 4 && fileEdits === 0 ? 'probe' : 'execution');
 
   const rec = finalizeCommonMetrics({
     session_uid: `claude:${sessionId}`,
@@ -1292,7 +1749,7 @@ function parseClaudeFile(filePath) {
     bg_wait_sec: 0,
     source_path: filePath,
     sub_ref_ids: '[]',
-  }, qTask);
+  }, qEval);
   return { rec, turns, phaseSplit: null };
 }
 
@@ -1307,7 +1764,10 @@ function parseCodexFile(filePath) {
   let cmdTotal = 0, cmdFailed = 0, fileEdits = 0, imageReads = 0, compactions = 0;
   let maxTotalIn = 0, maxTotalCached = 0, maxTotalOut = 0;
   let sumDeltaIn = 0, sumDeltaCached = 0, sumDeltaOut = 0;
-  let durationSec = 0, startTs = null, endTs = null, lastNegTs = 0, lastCmdOk = true;
+  let durationSec = 0, startTs = null, endTs = null, lastNegTs = 0, lastUserTs = 0, lastCmdOk = true;
+  let hasEdited = false, hasProduced = false, pendingCmdMeta = null;
+  let ranVerifySuiteOk = false, ranCmdAfterEditOk = false, inspectedOutputMedia = false;
+  let allStepsDone = false, hasUnfinishedSteps = false, shippedGitOrPkg = false, usedSubagentVerify = false;
   const ctxArr = [];
   const userTexts = [];
   const plannerTimestamps = [];
@@ -1333,6 +1793,7 @@ function parseCodexFile(filePath) {
     } else if (tp === 'response_item' && pl.type === 'message') {
       if (pl.role === 'user') {
         userTurns++;
+        if (ts !== null && ts > lastUserTs) lastUserTs = ts;
         const txt = JSON.stringify(pl.content || '');
         const m = /"text"\s*:\s*"([^"]{3,220})"/.exec(txt);
         const cleanU = m ? m[1].replace(/\\n/g, ' ') : txt.slice(0, 180);
@@ -1349,13 +1810,40 @@ function parseCodexFile(filePath) {
       toolCalls++;
       const nm = String(pl.name || '').toLowerCase();
       const inpStr = String(pl.input || pl.arguments || '');
-      if (nm.includes('exec') || nm.includes('shell') || inpStr.includes('exec_command')) cmdTotal++;
-      if (nm.includes('patch') || nm.includes('write') || inpStr.includes('apply_patch')) fileEdits++;
+      if (nm.includes('patch') || nm.includes('write') || inpStr.includes('apply_patch')) {
+        fileEdits++;
+        hasEdited = true;
+        hasProduced = true;
+      } else if (nm.includes('exec') || nm.includes('shell') || inpStr.includes('exec_command')) {
+        cmdTotal++;
+        hasProduced = true;
+        pendingCmdMeta = {
+          afterEdit: hasEdited,
+          isVer: VERIFY_CMD_RE.test(inpStr),
+          isShip: SHIP_CMD_RE.test(inpStr),
+        };
+      } else if ((nm.includes('view_image') || nm.includes('read')) && hasProduced && MEDIA_EXT_RE.test(inpStr)) {
+        inspectedOutputMedia = true;
+      } else if (nm.includes('spawn_agent') || nm.includes('subagent')) {
+        usedSubagentVerify = true;
+      } else if (nm.includes('update_plan')) {
+        const sts = [...inpStr.matchAll(/"status"\s*:\s*"([^"]+)"/g)].map((x) => x[1]);
+        if (sts.length) {
+          allStepsDone = sts.every((x) => x === 'completed' || x === 'done');
+          hasUnfinishedSteps = sts.some((x) => x === 'in_progress' || x === 'pending');
+        }
+      }
     } else if (tp === 'response_item' && (pl.type === 'custom_tool_call_output' || pl.type === 'function_call_output')) {
       const outS = String(pl.output || '');
       const failed = /exit_code":\s*[1-9]|exited with code [1-9]|Error:/i.test(outS);
       lastCmdOk = !failed;
       if (failed) cmdFailed++;
+      else if (pendingCmdMeta) {
+        if (pendingCmdMeta.afterEdit) ranCmdAfterEditOk = true;
+        if (pendingCmdMeta.afterEdit && pendingCmdMeta.isVer) ranVerifySuiteOk = true;
+        if (pendingCmdMeta.isShip) shippedGitOrPkg = true;
+      }
+      pendingCmdMeta = null;
     } else if (tp === 'event_msg' && pl.type === 'compacted') {
       compactions++;
     } else if (tp === 'event_msg' && pl.type === 'token_count' && pl.info) {
@@ -1384,20 +1872,36 @@ function parseCodexFile(filePath) {
   if (plannerTurns === 0) plannerTurns = Math.max(1, toolCalls);
 
   const turnsAfterNeg = lastNegTs > 0 ? plannerTimestamps.filter((t) => t > lastNegTs).length : plannerTurns;
-  const qTask = evaluateTaskCompletionQuality({
+  const turnsAfterLastUser = lastUserTs > 0 ? plannerTimestamps.filter((t) => t > lastUserTs).length : plannerTurns;
+  const isActivelyRunning = endTs !== null && (Date.now() / 1000 - endTs) < 600;
+  const role = isSub ? 'subagent' : (plannerTurns <= 4 && fileEdits === 0 ? 'probe' : 'execution');
+
+  const qEval = evaluateTaskCompletionQuality({
     userTexts,
     plannerTurnsAfterLastNeg: turnsAfterNeg,
+    plannerTurnsAfterLastUser: turnsAfterLastUser,
     fileEdits,
-    toolCalls,
+    outputTokens: finalOu,
+    cmdTotal,
+    cmdFailed,
     plannerTurns,
     lastCmdSucceeded: lastCmdOk,
+    ranVerifySuiteOk,
+    ranCmdAfterEditOk,
+    inspectedOutputMedia,
+    allStepsDone,
+    hasUnfinishedSteps,
+    usedSubagentVerify,
+    shippedGitOrPkg,
+    abruptEnd: Boolean(pendingCmdMeta),
+    isActivelyRunning,
+    endedAtSec: endTs || 0,
   });
 
   const wallSec = startTs && endTs && endTs > startTs ? Math.min(3600, endTs - startTs) : 10;
   const totalSec = durationSec > 0 ? durationSec : wallSec;
   const meanCtxK = ctxArr.length ? ctxArr.reduce((a, b) => a + b, 0) / ctxArr.length / 1000 : 0;
   const maxCtxK = ctxArr.length ? Math.max(...ctxArr) / 1000 : 0;
-  const role = isSub ? 'subagent' : (plannerTurns <= 4 && fileEdits === 0 ? 'probe' : 'execution');
 
   const rec = finalizeCommonMetrics({
     session_uid: `codex:${sessionId}`,
@@ -1434,7 +1938,7 @@ function parseCodexFile(filePath) {
     bg_wait_sec: 0,
     source_path: filePath,
     sub_ref_ids: '[]',
-  }, qTask);
+  }, qEval);
   return { rec, turns, phaseSplit: null };
 }
 
@@ -1446,7 +1950,7 @@ function parseCustomDropinFile(filePath) {
     try {
       const o = JSON.parse(l);
       if (!o.session_id) continue;
-      const qTask = o.q_task !== undefined ? Number(o.q_task) : 90.0;
+      const qTask = o.q_task !== undefined ? Number(o.q_task) : 62.0;
       const rec = finalizeCommonMetrics({
         session_uid: `custom:${o.session_id}`,
         platform: o.platform || 'custom-agent',
@@ -1507,6 +2011,7 @@ function walkFiles(rootDir, predicate, maxDepth = 6, depth = 0, out = []) {
 
 export function syncAllAgentSources(db, dataDir, forceFull = false) {
   const t0 = Date.now();
+  const extTitles = loadLiveExternalTitles();
   const wmMap = new Map();
   if (!forceFull) {
     for (const row of db.prepare('SELECT source_path, mtime_ms, size_bytes FROM file_watermarks').all()) {
@@ -1531,6 +2036,9 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
   for (const fp of walkFiles(join(HOME, '.codex', 'sessions'), (_, nm) => nm.endsWith('.jsonl'), 5)) {
     candidates.push({ platform: 'codex', path: fp });
   }
+  for (const fp of walkFiles(join(HOME, '.codex', 'archived_sessions'), (_, nm) => nm.endsWith('.jsonl'), 5)) {
+    candidates.push({ platform: 'codex', path: fp });
+  }
   for (const fp of walkFiles(join(dataDir, 'dropin'), (_, nm) => nm.endsWith('.jsonl'), 2)) {
     candidates.push({ platform: 'custom', path: fp });
   }
@@ -1542,14 +2050,14 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
       user_turns, neg_feedback_turns, planner_turns, tool_calls, single_tool_turns,
       cmd_total, cmd_failed, file_edits, image_reads, compactions, input_tokens, cache_read_tokens, output_tokens,
       mean_ctx_k, max_ctx_k, token_accuracy, raw_cost_units, weighted_cost_units, cache_tax_share,
-      llm_infer_sec, sync_tool_sec, bg_wait_sec, exec_time_min, workload_score, q_objective, source_path, sub_ref_ids
+      llm_infer_sec, sync_tool_sec, bg_wait_sec, exec_time_min, workload_score, q_objective, q_breakdown, source_path, sub_ref_ids
     ) VALUES (
       $session_uid, $platform, $raw_id, $parent_uid, $is_subagent, $session_role, $project_key, $linked_uids,
       $domain, $primary_model, $model_tier, $model_mult, $started_at, $ended_at, $cwd, $display_name, $title,
       $user_turns, $neg_feedback_turns, $planner_turns, $tool_calls, $single_tool_turns,
       $cmd_total, $cmd_failed, $file_edits, $image_reads, $compactions, $input_tokens, $cache_read_tokens, $output_tokens,
       $mean_ctx_k, $max_ctx_k, $token_accuracy, $raw_cost_units, $weighted_cost_units, $cache_tax_share,
-      $llm_infer_sec, $sync_tool_sec, $bg_wait_sec, $exec_time_min, $workload_score, $q_objective, $source_path, $sub_ref_ids
+      $llm_infer_sec, $sync_tool_sec, $bg_wait_sec, $exec_time_min, $workload_score, $q_objective, $q_breakdown, $source_path, $sub_ref_ids
     ) ON CONFLICT(session_uid) DO UPDATE SET
       parent_uid = CASE WHEN excluded.parent_uid != '' THEN excluded.parent_uid ELSE sessions.parent_uid END,
       is_subagent = MAX(sessions.is_subagent, excluded.is_subagent),
@@ -1589,26 +2097,27 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
       exec_time_min = excluded.exec_time_min,
       workload_score = excluded.workload_score,
       q_objective = excluded.q_objective,
+      q_breakdown = excluded.q_breakdown,
       sub_ref_ids = excluded.sub_ref_ids
   `);
 
   const upsertPhase = db.prepare(`
     INSERT INTO session_phases (
       session_uid, platform, split_kind, trigger_summary,
-      b_label, b_turns, b_sub_uids, b_exec_min, b_main_cost_u, b_deliverables, b_q_task,
-      a_label, a_turns, a_sub_uids, a_exec_min, a_main_cost_u, a_deliverables, a_q_task
+      b_label, b_turns, b_sub_uids, b_exec_min, b_main_cost_u, b_deliverables, b_q_task, b_q_breakdown,
+      a_label, a_turns, a_sub_uids, a_exec_min, a_main_cost_u, a_deliverables, a_q_task, a_q_breakdown
     ) VALUES (
       $session_uid, $platform, $split_kind, $trigger_summary,
-      $b_label, $b_turns, $b_sub_uids, $b_exec_min, $b_main_cost_u, $b_deliverables, $b_q_task,
-      $a_label, $a_turns, $a_sub_uids, $a_exec_min, $a_main_cost_u, $a_deliverables, $a_q_task
+      $b_label, $b_turns, $b_sub_uids, $b_exec_min, $b_main_cost_u, $b_deliverables, $b_q_task, $b_q_breakdown,
+      $a_label, $a_turns, $a_sub_uids, $a_exec_min, $a_main_cost_u, $a_deliverables, $a_q_task, $a_q_breakdown
     ) ON CONFLICT(session_uid) DO UPDATE SET
       split_kind = excluded.split_kind, trigger_summary = excluded.trigger_summary,
       b_label = excluded.b_label, b_turns = excluded.b_turns, b_sub_uids = excluded.b_sub_uids,
       b_exec_min = excluded.b_exec_min, b_main_cost_u = excluded.b_main_cost_u,
-      b_deliverables = excluded.b_deliverables, b_q_task = excluded.b_q_task,
+      b_deliverables = excluded.b_deliverables, b_q_task = excluded.b_q_task, b_q_breakdown = excluded.b_q_breakdown,
       a_label = excluded.a_label, a_turns = excluded.a_turns, a_sub_uids = excluded.a_sub_uids,
       a_exec_min = excluded.a_exec_min, a_main_cost_u = excluded.a_main_cost_u,
-      a_deliverables = excluded.a_deliverables, a_q_task = excluded.a_q_task
+      a_deliverables = excluded.a_deliverables, a_q_task = excluded.a_q_task, a_q_breakdown = excluded.a_q_breakdown
   `);
 
   const upsertWm = db.prepare(`
@@ -1633,7 +2142,9 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
       scanned++;
       let st;
       try { st = statSync(item.path); } catch { continue; }
-      const mtimeMs = Math.floor(st.mtimeMs);
+      const rawMtimeMs = Math.floor(st.mtimeMs);
+      const extMeta = item.platform === 'antigravity' ? extTitles.get(`agy:${item.cid.toLowerCase()}`) : null;
+      const mtimeMs = extMeta?.annMtimeMs ? Math.max(rawMtimeMs, extMeta.annMtimeMs) : rawMtimeMs;
       const sz = st.size;
       if (sz < 80) continue;
 
@@ -1645,7 +2156,7 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
 
       let parsedList = [];
       if (item.platform === 'antigravity') {
-        const res = parseAntigravityFile(item.path, item.cid);
+        const res = parseAntigravityFile(item.path, item.cid, extMeta);
         if (res) parsedList.push(res);
       } else if (item.platform === 'dsh') {
         const res = parseDshFile(item.path);
@@ -1694,7 +2205,6 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
     }
 
     // 实时对齐全平台外部对话标题与用户手动重命名（即使 transcript.jsonl 未新增字节，改名也会在毫秒内立刻生效！）
-    const extTitles = loadLiveExternalTitles();
     const allDbSess = db.prepare('SELECT session_uid, platform, raw_id, is_subagent, parent_uid, project_key, display_name, title FROM sessions').all();
     const updateNameStmt = db.prepare("UPDATE sessions SET display_name = ?, parent_uid = CASE WHEN ? != '' THEN ? ELSE parent_uid END, project_key = CASE WHEN project_key = '' AND ? != '' THEN ? ELSE project_key END WHERE session_uid = ?");
 
@@ -1729,6 +2239,31 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
         updSubName.run(desired, sr.session_uid);
         updated++;
       }
+    }
+
+    // 兜底重评那些原始日志文件已被客户端清理/搬移的历史遗留会话，确保 100% 样本对齐 v1.4 五维标准
+    const legacyRows = db.prepare("SELECT * FROM sessions WHERE q_breakdown = '{}' OR q_breakdown IS NULL").all();
+    const updLegacy = db.prepare('UPDATE sessions SET q_objective = ?, q_breakdown = ? WHERE session_uid = ?');
+    for (const lr of legacyRows) {
+      const fakeUTexts = Array.from({ length: Math.max(1, lr.user_turns || 1) }, (_, idx) => (idx === 0 ? lr.title : '继续推进'));
+      for (let k = 0; k < Math.min(fakeUTexts.length - 1, lr.neg_feedback_turns || 0); k++) {
+        fakeUTexts[k + 1] = '不对，需要修改';
+      }
+      const qEv = evaluateTaskCompletionQuality({
+        userTexts: fakeUTexts,
+        plannerTurnsAfterLastNeg: 6,
+        plannerTurnsAfterLastUser: 4,
+        fileEdits: lr.file_edits || 0,
+        outputTokens: lr.output_tokens || 0,
+        cmdTotal: lr.cmd_total || 0,
+        cmdFailed: lr.cmd_failed || 0,
+        plannerTurns: lr.planner_turns || 1,
+        lastCmdSucceeded: (lr.cmd_failed || 0) < Math.max(1, lr.cmd_total || 0),
+        ranCmdAfterEditOk: (lr.file_edits || 0) >= 1 && (lr.cmd_total || 0) > (lr.cmd_failed || 0),
+        inspectedOutputMedia: (lr.image_reads || 0) >= 2 && (lr.file_edits || 0) >= 1,
+      });
+      updLegacy.run(qEv.score, JSON.stringify(qEv), lr.session_uid);
+      updated++;
     }
 
     db.exec('COMMIT');

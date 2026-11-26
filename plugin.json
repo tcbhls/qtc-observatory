@@ -1,8 +1,8 @@
 {
   "name": "qtc-observatory",
   "displayName": "QTC Observatory（跨Agent实时任务监测与自修正研究台）",
-  "description": "100% 零干扰旁路实时监测本地所有 AI Agent 的任务完成质量(Q_task)、时间成本(T)与额度耗用率(C_dot)；基于受控基线-实验因果差分框架与功率-速度守恒定律，精准抓捕“时间没省多少、额度耗用率剧增”的捡芝麻丢西瓜与降质行为。",
-  "version": "1.3.0",
+  "description": "100% 零干扰旁路实时监测本地所有 AI Agent 的任务完成质量(Q_task，基于 62 分中性基准与五维客观证据累积准则)、时间成本(T)与额度耗用率(C_dot)；精准区分无反馈沉默结案与验证落库卓越交付，抓捕捡芝麻丢西瓜与降质行为。",
+  "version": "1.4.0",
   "license": "MIT",
   "repository": "https://github.com/tcbhls/qtc-observatory",
   "logo": "assets/logo.svg",
