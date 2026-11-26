@@ -328,7 +328,11 @@ export function evaluateCounterfactualPair({
     reasons.push(`长会话未分阶段清零历史上下文，单轮均摊成本从 ${unitCostB.toFixed(3)}U 涨至 ${unitCostA.toFixed(3)}U (+${costSurgePct.toFixed(1)}%)`);
   }
   if (advisorInfo) {
-    reasons.push(`关联外部优化方案咨询会话 (${advisorInfo.uid.slice(0, 12)}) 额外消耗规划成本 +${advisorInfo.cost_u.toFixed(2)}U`);
+    const advShort = (advisorInfo.uid.split(':')[1] || advisorInfo.uid).replace(/^session-/, '').slice(0, 8);
+    const advLabel = advisorInfo.display_name
+      ? `「${advisorInfo.display_name}」(#${advShort})`
+      : advShort;
+    reasons.push(`关联优化顾问对话 ${advLabel} 额外消耗规划成本 +${advisorInfo.cost_u.toFixed(2)}U`);
   }
   if (!reasons.length) {
     reasons.push(`质量保持/提升 (ΔQ=${deltaQ >= 0 ? '+' : ''}${deltaQ.toFixed(1)})，耗用率与速度处于合理均衡区间`);
@@ -344,11 +348,14 @@ export function evaluateCounterfactualPair({
     comparison_scope: comparisonScope,
     platform,
     domain,
+    display_name: target.display_name || title,
+    base_display_name: base.display_name || title,
     title,
     trigger_note: triggerNote,
     advisor_info: advisorInfo,
     base: {
       uid: base.uid,
+      display_name: base.display_name || title,
       label: base.label,
       turns: base.turns,
       sub_count: base.subCount,
@@ -359,6 +366,7 @@ export function evaluateCounterfactualPair({
     },
     target: {
       uid: target.uid,
+      display_name: target.display_name || title,
       label: target.label,
       turns: target.turns,
       sub_count: target.subCount,
@@ -447,7 +455,9 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
     .map((r) => ({
       session_uid: r.session_uid,
       platform: r.platform,
+      display_name: r.display_name || r.title,
       title: r.title,
+      is_subagent: r.is_subagent,
       primary_model: r.primary_model,
       turns: r.planner_turns,
       ctx_k: r.max_ctx_k,
@@ -486,6 +496,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         if (byUid.has(targetUid)) {
           advisorMap.set(targetUid, {
             uid: r.session_uid,
+            display_name: r.display_name || r.title,
             cost_u: Number(r.weighted_cost_units.toFixed(3)),
             T_min: Number(r.exec_time_min.toFixed(1)),
             title: r.title,
@@ -524,6 +535,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       session_role: r.session_role || 'execution',
       project_key: r.project_key || '',
       domain: r.domain,
+      display_name: r.display_name || r.title,
       title: r.title,
       primary_model: r.primary_model,
       model_tier: r.model_tier,
@@ -589,7 +601,8 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       advisorInfo: adv,
       base: {
         uid: p.session_uid,
-        label: `【基线 B】本任务${ph.b_label}`,
+        display_name: p.display_name,
+        label: `本任务 · ${ph.b_label}`,
         turns: ph.b_turns,
         subCount: bSubs.length,
         T_min: ph.b_exec_min,
@@ -600,7 +613,8 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       },
       target: {
         uid: p.session_uid,
-        label: `【实验 A】本任务${ph.a_label}`,
+        display_name: p.display_name,
+        label: `本任务 · ${ph.a_label}`,
         turns: ph.a_turns,
         subCount: aSubs.length,
         T_min: ph.a_exec_min,
@@ -629,18 +643,22 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       const turnRatio = curr.tree_turns / Math.max(1, prev.tree_turns);
       if (turnRatio < 0.35 || turnRatio > 2.8) continue;
 
+      const prevShort = (prev.session_uid.split(':')[1] || prev.session_uid).replace(/^session-/, '').slice(0, 8);
+      const currShort = (curr.session_uid.split(':')[1] || curr.session_uid).replace(/^session-/, '').slice(0, 8);
+
       counterfactualPairs.push(evaluateCounterfactualPair({
         pairId: `cross:${prev.session_uid}->${curr.session_uid}`,
         pairCategory: 'cross_project',
-        comparisonScope: `同一工程目录跨会话迭代对照 (${projKey})`,
+        comparisonScope: `同一工程跨对话迭代 (${projKey})`,
         platform: curr.platform,
         domain: curr.domain,
-        title: curr.title,
-        triggerNote: `对比同目录前序会话 ${prev.session_uid.slice(0, 14)} (${prev.primary_model}) -> 当前 (${curr.primary_model})`,
+        title: curr.display_name,
+        triggerNote: `「${prev.display_name}」(#${prevShort}) → 「${curr.display_name}」(#${currShort})`,
         advisorInfo: advisorMap.get(curr.session_uid) || null,
         base: {
           uid: prev.session_uid,
-          label: `【基线 B】同工程前序会话 ${prev.session_uid.split(':')[1]?.slice(0, 8) || prev.session_uid}`,
+          display_name: prev.display_name,
+          label: `「${prev.display_name}」(#${prevShort})`,
           turns: prev.tree_turns,
           subCount: prev.sub_count,
           T_min: prev.T_min,
@@ -651,7 +669,8 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         },
         target: {
           uid: curr.session_uid,
-          label: `【实验 A】同工程后续会话 ${curr.session_uid.split(':')[1]?.slice(0, 8) || curr.session_uid}`,
+          display_name: curr.display_name,
+          label: `「${curr.display_name}」(#${currShort})`,
           turns: curr.tree_turns,
           subCount: curr.sub_count,
           T_min: curr.T_min,
@@ -950,7 +969,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       power_law_cost_vs_turns: {
         ...regPowerLaw,
         points: validSess.slice(0, 360).map((s) => ({
-          uid: s.session_uid, platform: s.platform, title: s.title.slice(0, 50), is_sub: s.is_subagent,
+          uid: s.session_uid, platform: s.platform, name: s.display_name || s.title.slice(0, 36), title: s.title.slice(0, 60), is_sub: s.is_subagent,
           x: Number(Math.log(s.planner_turns).toFixed(3)),
           y: Number(Math.log(s.raw_cost_units).toFixed(3)),
         })),
@@ -958,7 +977,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       linear_throughput: {
         ...regLinearThroughput,
         points: nonOutlierSess.slice(0, 360).map((s) => ({
-          uid: s.session_uid, platform: s.platform, title: s.title.slice(0, 50), is_sub: s.is_subagent,
+          uid: s.session_uid, platform: s.platform, name: s.display_name || s.title.slice(0, 36), title: s.title.slice(0, 60), is_sub: s.is_subagent,
           x: Number(((s.model_mult * s.planner_turns * s.mean_ctx_k) / 1000.0).toFixed(3)),
           y: Number(s.weighted_cost_units.toFixed(3)),
         })),
@@ -966,7 +985,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       quality_vs_turns: {
         ...regQualityVsTurns,
         points: execRoots.slice(0, 320).map((p) => ({
-          uid: p.session_uid, platform: p.platform, title: p.title.slice(0, 50), comp: p.compactions,
+          uid: p.session_uid, platform: p.platform, name: p.display_name, title: p.title.slice(0, 60), comp: p.compactions,
           x: Number(Math.log(p.tree_turns).toFixed(3)),
           y: p.Q_final,
         })),
@@ -976,7 +995,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         mult_beta: multTurnFit.beta,
         mult_r2: multTurnFit.r2,
         points: filtTurns.slice(0, 420).map((t, idx) => ({
-          uid: `${t.platform}#${idx}`, platform: t.platform, title: `${t.model_tier} (Ctx=${t.ctx_k}k)`,
+          uid: `${t.platform}#${idx}`, platform: t.platform, name: `${t.model_tier} 单步推理`, title: `上下文水位 ${t.ctx_k}k Tokens`,
           x: Number(t.out_k.toFixed(3)),
           y: Number(t.llm_sec.toFixed(2)),
         })),
@@ -987,7 +1006,7 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
         n_crit_50: dynamicNCrit50,
         curve: sigmoidCurve,
         points: execRoots.slice(0, 260).map((p) => ({
-          uid: p.session_uid, platform: p.platform, title: p.title.slice(0, 50),
+          uid: p.session_uid, platform: p.platform, name: p.display_name, title: p.title.slice(0, 60),
           x: Number(Math.log(Math.max(1, p.tree_turns)).toFixed(3)),
           y: p.is_high_ce ? 98 : 2,
           comp: p.compactions,
@@ -996,9 +1015,12 @@ export function computeObservatoryAnalytics(db, filterPlatform = 'all') {
       burn_vs_speed_phase: {
         theory_curves: theoryCurves,
         points: counterfactualPairs.map((cp) => ({
-          uid: cp.pair_id,
+          uid: cp.target.uid,
+          pair_id: cp.pair_id,
           platform: cp.platform,
-          title: `${cp.title.slice(0, 34)} (${cp.comparison_scope})`,
+          name: cp.display_name,
+          scope: cp.comparison_scope,
+          title: `${cp.base.label} → ${cp.target.label}`,
           x: Math.max(-45, Math.min(72, cp.deltas.time_saved_pct)),
           y: Math.max(-60, Math.min(240, cp.deltas.burn_surge_pct)),
           dq: cp.deltas.delta_Q,
@@ -1095,7 +1117,7 @@ export function exportObservatoryCsv(db, dataDir) {
     ORDER BY s.ended_at DESC, s.started_at DESC
   `).all();
   const cols = [
-    'session_uid', 'platform', 'session_role', 'project_key', 'is_subagent', 'parent_uid', 'domain',
+    'session_uid', 'display_name', 'platform', 'session_role', 'project_key', 'is_subagent', 'parent_uid', 'domain',
     'primary_model', 'model_tier', 'model_mult', 'planner_turns', 'tool_calls', 'file_edits', 'compactions',
     'input_tokens', 'cache_read_tokens', 'output_tokens', 'raw_cost_units', 'weighted_cost_units',
     'exec_time_min', 'q_objective', 'q_human', 'title',

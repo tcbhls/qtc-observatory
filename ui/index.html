@@ -3,174 +3,219 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>QTC 跨Agent实时任务监测与因果对照研究台 v1.2</title>
+  <title>QTC Observatory — 跨Agent实时监测与因果对照中心</title>
   <style>/*__INLINE_CSS__*/</style>
 </head>
 <body>
   <div class="app-shell">
+    <!-- 顶部极简导航栏 -->
     <header class="topbar">
-      <div class="brand">
-        <span class="badge-zero">● 零干扰只读旁路 (0 Prompt注入)</span>
-        <span id="liveStreamBadge" class="badge-live">⚡ 正在连接实时流...</span>
-        <h1>QTC 跨Agent实时研究观测台 <small style="font-size:11px;color:#94a3b8;font-weight:500">v1.2 因果差分与耗用率守恒版</small></h1>
+      <div class="brand-group">
+        <div class="logo-mark" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-7"/>
+          </svg>
+        </div>
+        <div class="brand-title-wrap">
+          <h1>QTC 观测中心</h1>
+          <span class="ver-tag">v1.3</span>
+        </div>
+        <span class="divider-v"></span>
+        <div id="liveStreamBadge" class="live-status" title="只读旁路监听中：0 Prompt 注入、0 执行拦截，改名或新增步进均秒级同步">
+          <span class="status-dot"></span>
+          <span id="liveStatusText">正在连接实时流…</span>
+        </div>
       </div>
+
       <div class="toolbar">
-        <select id="platformFilter" title="按 AI Agent 平台筛选样本">
-          <option value="all">全部 AI Agent 平台</option>
-          <option value="antigravity">Google Antigravity</option>
-          <option value="dsh">DeepSeek Harness (DSH)</option>
-          <option value="claude-code">Claude Code</option>
-          <option value="codex">OpenAI Codex</option>
-          <option value="custom">Custom Drop-in</option>
-        </select>
-        <button id="btnSync" class="btn primary">立即强制同步</button>
-        <button id="btnExport" class="btn">导出 CSV 样本库</button>
+        <div class="select-wrap">
+          <select id="platformFilter" title="筛选 AI Agent 平台">
+            <option value="all">全部平台</option>
+            <option value="antigravity">Antigravity</option>
+            <option value="dsh">DeepSeek (DSH)</option>
+            <option value="codex">OpenAI Codex</option>
+            <option value="claude-code">Claude Code</option>
+            <option value="custom">Custom 接入</option>
+          </select>
+        </div>
+        <button id="btnExport" class="btn ghost">导出 CSV</button>
+        <button id="btnSync" class="btn primary">同步最新数据</button>
       </div>
     </header>
 
-    <div id="livePulseStrip" class="live-pulse-strip"></div>
+    <!-- 实时活跃对话脉搏栏（直接显示对话名称 + 短编号） -->
+    <section id="livePulseStrip" class="live-rail" aria-label="实时活跃对话"></section>
 
-    <nav class="tabs">
-      <button class="tab active" data-tab="overview">1. 跨Agent样本与账单拆解</button>
-      <button class="tab" data-tab="regression">2. 6大实时回归与耗用率相图</button>
-      <button class="tab" data-tab="sesame">3. 策略优化前后对照 &amp; 耗用率审计 <span id="alertCountPill" class="pill-danger">0</span></button>
-      <button class="tab" data-tab="prescribe">4. 极致性价比 vs 极致完成质量推算</button>
-      <button class="tab" data-tab="samples">5. 样本明细与任务完成质量校准</button>
+    <!-- Linear 风格下划线标签导航 -->
+    <nav class="nav-tabs" role="tablist">
+      <button class="nav-tab active" data-tab="sesame">策略对照与耗用率审计 <span id="alertCountPill" class="nav-badge">0</span></button>
+      <button class="nav-tab" data-tab="overview">全局概览与平台矩阵</button>
+      <button class="nav-tab" data-tab="regression">实时回归与相图实验室</button>
+      <button class="nav-tab" data-tab="prescribe">双模式最优工作法推算</button>
+      <button class="nav-tab" data-tab="samples">对话样本库与质量校准</button>
     </nav>
 
-    <div id="statusBanner" class="status-banner hidden"></div>
+    <div id="statusBanner" class="toast-banner hidden"></div>
 
-    <main class="content">
-      <!-- TAB 1: 全局总览 -->
-      <section id="tab-overview" class="panel active">
-        <div id="kpiGrid" class="kpi-grid"></div>
-
-        <div class="two-col">
-          <div class="box">
-            <h3>金钱/额度真实去向拆解 (为什么 80%+ 花在喂上下文？)</h3>
-            <div id="costStackBar" class="stack-wrap"></div>
-          </div>
-          <div class="box">
-            <h3>挂钟执行时间真实去向拆解 (等待 vs 思考 vs 工具)</h3>
-            <div id="timeStackBar" class="stack-wrap"></div>
-          </div>
-        </div>
-
-        <div class="box">
-          <h3>本机各 AI Agent 平台真实样本横向对比矩阵</h3>
-          <div class="table-scroll">
-            <table class="data-table" id="platformTable">
-              <thead>
-                <tr>
-                  <th>AI Agent 平台</th>
-                  <th>收录总会话 (主+子)</th>
-                  <th>累计交互轮数</th>
-                  <th>输入 (M)</th>
-                  <th>缓存重读 (M)</th>
-                  <th>输出 (M)</th>
-                  <th>任务完成质量均分 Q_task</th>
-                  <th>平均额度耗用率</th>
-                  <th>累计执行时长 / 总额度</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <!-- TAB 2: 6大实时回归与耗用率相图实验室 -->
-      <section id="tab-regression" class="panel">
-        <div class="box">
-          <div class="reg-header">
+    <main class="workspace">
+      <!-- TAB 3 (现设为默认首屏，直击核心决策！): 策略对照与耗用率审计 -->
+      <section id="tab-sesame" class="view-panel active">
+        <!-- 交互式任意 A vs B 配对验算器 -->
+        <div class="surface-block">
+          <div class="section-head">
             <div>
-              <h3 id="regTitle">真实样本在线最小二乘 (OLS) 与功率-速度因果相图</h3>
-              <p id="regFormula" class="formula-bar"></p>
-            </div>
-            <div class="chart-export-group">
-              <button id="btnExportChartPng" class="btn sm" title="将当前实时图表导出为 2x 高清 PNG 图片">🖼 导出当前图 PNG</button>
-              <button id="btnExportChartSvg" class="btn sm" title="导出无损矢量 SVG 图表">📐 导出 SVG</button>
+              <h2>自由配对验算台（基线 B vs 实验方案 A）</h2>
+              <p>任选两个对话或前后阶段进行受控对比。遵循守恒式 <code>c_A/c_B = (1 + ΔC_dot%) × (1 - s_T%)</code>，对话改名会实时同步至此列表。</p>
             </div>
           </div>
-          <div class="reg-selector" style="margin-bottom:10px">
-            <button class="btn sm active" data-reg="phase">① 省时率 vs 额度耗用率增幅 因果相图</button>
-            <button class="btn sm" data-reg="power">② ln(C) vs ln(N) 轮数幂律膨胀</button>
-            <button class="btn sm" data-reg="linear">③ C vs (μ·N·L) 纯线性计费吞吐</button>
-            <button class="btn sm" data-reg="quality">④ 任务完成质量 Q_task vs ln(N)</button>
-            <button class="btn sm" data-reg="latency">⑤ t_LLM vs Out_k 单步延迟多元回归</button>
-            <button class="btn sm" data-reg="sigmoid">⑥ P_CE(N) 在线IRLS概率生死线</button>
-          </div>
-          <div class="chart-stage">
-            <svg id="regSvg" viewBox="0 0 880 410" preserveAspectRatio="xMidYMid meet"></svg>
-            <div id="chartTooltip" class="chart-tooltip hidden"></div>
-          </div>
-        </div>
 
-        <div class="box">
-          <h3>📈 数学模型在线自我修正演化记录 (随每一轮新样本入库自动重训练快照)</h3>
-          <div class="table-scroll" style="max-height:230px">
-            <table class="data-table" id="evolutionTable">
-              <thead>
-                <tr>
-                  <th>快照时间</th>
-                  <th>样本数 n</th>
-                  <th>累计轮数 ∑N</th>
-                  <th>幂律指数 β_power</th>
-                  <th>线性吞吐率 k_lin</th>
-                  <th>完成质量斜率 β_Q</th>
-                  <th>动态50%生死线 N_50%</th>
-                  <th>IRLS分类准确率</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
-
-      <!-- TAB 3: 受控因果对照实验台 (明确谁和谁比 + 质量对比 + 耗用率对比) -->
-      <section id="tab-sesame" class="panel">
-        <!-- 交互式任意 A vs B 受控配对验算器 -->
-        <div class="box border-sky">
-          <h3>⚖️ 交互式「基线 B vs 实验组 A」受控配对验算器 (想拿哪两个任务或阶段比，由你精准指定)</h3>
-          <p class="sub-note">数学守恒定律：<code>单位成本比 c_A/c_B = (1 + 耗用率增幅 ΔC_dot%) × (1 - 省时率 s_T%)</code>。在默认要求<strong>任务完成质量保持 (ΔQ ≥ -3)</strong> 的前提下，一旦耗用率增幅远超零溢价边界 <code>s_T/(1 - s_T)</code>，即触发“时间没省多少，额度耗用率反而剧增”！</p>
-          <div class="sim-grid" style="grid-template-columns: 2fr 2fr 1fr">
-            <label>选择【对照基线 B (优化前阶段 / 原方案会话)】：
+          <div class="ab-selector-bar">
+            <div class="field-block">
+              <label for="cmpBaseSelect">对照基线 B（优化前阶段 / 原方案对话）</label>
               <select id="cmpBaseSelect"></select>
-            </label>
-            <label>选择【实验组 A (优化后阶段 / 新方案会话)】：
+            </div>
+            <div class="ab-arrow" aria-hidden="true">→</div>
+            <div class="field-block">
+              <label for="cmpTargetSelect">实验方案 A（优化后阶段 / 新方案对话）</label>
               <select id="cmpTargetSelect"></select>
-            </label>
-            <label>实验A相对基线B的交付体量比 (M_A / M_B)：
-              <input type="number" id="cmpScaleInput" value="1.0" min="0.1" max="20" step="0.1" title="例如基线B完成了37.5页、实验A完成了22.5页，可填 0.60 以精确计算每页单价与单页速度！" />
-            </label>
+            </div>
+            <div class="field-block compact">
+              <label for="cmpScaleInput" title="若实验A完成的页数/模块数是基线B的 0.6 倍，填入 0.60 即可精确换算单位产出速度与单价">产出体量比 (M_A / M_B)</label>
+              <input type="number" id="cmpScaleInput" value="1.0" min="0.1" max="20" step="0.05" />
+            </div>
           </div>
-          <div id="cmpCustomResult" class="sim-result"></div>
+
+          <div id="cmpCustomResult" class="ab-scorecard"></div>
         </div>
 
-        <div class="box">
-          <div class="filter-row">
+        <!-- 受控因果对照实验榜 -->
+        <div class="surface-block">
+          <div class="section-head split">
             <div>
-              <h3>🔍 自动识别的受控因果对照实验榜 (彻底剔除无基线瞎比，每行明确标注【谁和谁比】)</h3>
-              <p class="sub-note" style="margin-bottom:0">仅收录：① <strong>同一任务中途注入加速/新方案前后自对照</strong>；② <strong>同一工程目录跨会话迭代对照</strong>；③ <strong>长会话(>85轮)前期清爽基线 vs 后期上下文膨胀耗用率对照</strong>。孤立测试与咨询会话已自动剥离。</p>
+              <h2>受控因果对照实验榜</h2>
+              <p>仅纳入有严格可比基准的实验（同对话前后优化阶段、同工程目录跨对话迭代、长对话上下文膨胀），已自动剥离孤立微探针。</p>
             </div>
-            <select id="pairCategoryFilter">
-              <option value="all">全部受控对照实验</option>
-              <option value="replacement">① 同任务提速/换方案前后自对照</option>
-              <option value="cross_project">② 同一工程目录跨会话迭代对照</option>
-              <option value="bloat_drift">③ 长会话前期vs后期耗用率膨胀</option>
-            </select>
+            <div class="select-wrap">
+              <select id="pairCategoryFilter">
+                <option value="all">全部受控对照类型</option>
+                <option value="replacement">同对话提速/换方案自对照</option>
+                <option value="cross_project">同工程目录跨对话迭代</option>
+                <option value="bloat_drift">长对话前后耗用率膨胀</option>
+              </select>
+            </div>
           </div>
-          <div class="table-scroll">
-            <table class="data-table" id="sesameTable">
+
+          <div class="table-container">
+            <table class="clean-table" id="sesameTable">
               <thead>
                 <tr>
-                  <th>对照范围 &amp; 【基线 B → 实验 A】</th>
-                  <th>任务完成质量对比 (Q_B → Q_A)</th>
-                  <th>耗时 / 真实提速对比</th>
-                  <th>额度耗用率 (U/h) &amp; 成本变化</th>
-                  <th>因果定性 &amp; 超额耗费</th>
-                  <th>物理病灶与根因拆解</th>
+                  <th style="min-width:270px">对话名称 &amp; 对照双方（基线 B → 实验 A）</th>
+                  <th class="num" style="min-width:130px">完成质量对比</th>
+                  <th class="num" style="min-width:125px">耗时 / 省时率</th>
+                  <th class="num" style="min-width:175px">额度耗用率 (U/h) &amp; 成本</th>
+                  <th style="min-width:145px">裁决结论</th>
+                  <th style="min-width:230px">关键成因拆解</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 1: 全局概览 -->
+      <section id="tab-overview" class="view-panel">
+        <div id="kpiGrid" class="metric-strip"></div>
+
+        <div class="grid-2">
+          <div class="surface-block">
+            <div class="section-head">
+              <h2>金钱/额度消耗结构</h2>
+              <p>按 API 物理计费权重拆解：为什么上下文重复读取往往吃掉大头？</p>
+            </div>
+            <div id="costStackBar" class="prop-bar-group"></div>
+          </div>
+          <div class="surface-block">
+            <div class="section-head">
+              <h2>任务挂钟耗时结构</h2>
+              <p>分离后台异步渲染/编译等待、模型流式思考与同步工具执行。</p>
+            </div>
+            <div id="timeStackBar" class="prop-bar-group"></div>
+          </div>
+        </div>
+
+        <div class="surface-block">
+          <div class="section-head">
+            <h2>各 AI Agent 平台横向统计矩阵</h2>
+            <p>跨平台统一折算口径（标准均衡 High 模型 1M Input = 1.0U，Cache Read = 0.2x，Output = 5.0x）。</p>
+          </div>
+          <div class="table-container">
+            <table class="clean-table" id="platformTable">
+              <thead>
+                <tr>
+                  <th>Agent 平台</th>
+                  <th class="num">收录对话 (主+子)</th>
+                  <th class="num">累计轮数</th>
+                  <th class="num">新增输入</th>
+                  <th class="num">缓存重读</th>
+                  <th class="num">模型输出</th>
+                  <th class="num">完成质量均分</th>
+                  <th class="num">平均耗用率</th>
+                  <th class="num">累计时长 / 总额度</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: 6大实时回归与耗用率相图 -->
+      <section id="tab-regression" class="view-panel">
+        <div class="surface-block">
+          <div class="section-head split">
+            <div>
+              <h2 id="regTitle">策略优化因果相图</h2>
+              <div id="regFormula" class="formula-code"></div>
+            </div>
+            <div class="btn-row">
+              <button id="btnExportChartPng" class="btn ghost sm">导出 PNG</button>
+              <button id="btnExportChartSvg" class="btn ghost sm">导出 SVG</button>
+            </div>
+          </div>
+
+          <div class="seg-control" id="regSelector">
+            <button class="seg-btn active" data-reg="phase">① 省时率 vs 耗用率相图</button>
+            <button class="seg-btn" data-reg="power">② 轮数幂律膨胀</button>
+            <button class="seg-btn" data-reg="linear">③ 物理计费线性吞吐</button>
+            <button class="seg-btn" data-reg="quality">④ 完成质量 vs 轮数</button>
+            <button class="seg-btn" data-reg="latency">⑤ 单步推理延迟回归</button>
+            <button class="seg-btn" data-reg="sigmoid">⑥ 在线 IRLS 生死线</button>
+          </div>
+
+          <div class="chart-frame">
+            <svg id="regSvg" viewBox="0 0 900 410" preserveAspectRatio="xMidYMid meet"></svg>
+            <div id="chartTooltip" class="floating-tip hidden"></div>
+          </div>
+        </div>
+
+        <div class="surface-block">
+          <div class="section-head">
+            <h2>数学模型在线自修正轨迹</h2>
+            <p>每当新对话步进落盘或人工校准质量分，系统自动重解 OLS 与 IRLS 方程组并记录参数演化。</p>
+          </div>
+          <div class="table-container" style="max-height:240px">
+            <table class="clean-table" id="evolutionTable">
+              <thead>
+                <tr>
+                  <th>更新时刻</th>
+                  <th class="num">样本数 n</th>
+                  <th class="num">累计轮数</th>
+                  <th class="num">幂律指数 β</th>
+                  <th class="num">线性费率 k</th>
+                  <th class="num">质量斜率 β_Q</th>
+                  <th class="num">50%生死线</th>
+                  <th class="num">IRLS 准确率</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -180,68 +225,89 @@
       </section>
 
       <!-- TAB 4: 双模式推算与策略沙盘 -->
-      <section id="tab-prescribe" class="panel">
-        <div id="constStrip" class="const-strip"></div>
-        <div class="two-col">
-          <div id="modeCeBox" class="box border-emerald"></div>
-          <div id="modeQualBox" class="box border-sky"></div>
+      <section id="tab-prescribe" class="view-panel">
+        <div id="constStrip" class="formula-banner"></div>
+
+        <div class="grid-2">
+          <div id="modeCeBox" class="surface-block accent-top-emerald"></div>
+          <div id="modeQualBox" class="surface-block accent-top-sky"></div>
         </div>
 
-        <div class="box">
-          <h3>交互式加速方案防坑沙盘 (相对「同任务标准均衡基线 B」实时推演 ΔQ / 省时率 / 耗用率增幅)</h3>
-          <p class="sub-note">在给正在运行的任务上“加速方案 / 子代理并发”前先拨动滑块：看看你的方案是真正省时省钱，还是由于阿姆达尔串行瓶颈导致“省时微弱但额度耗用率翻倍剧增”：</p>
-          <div class="sim-grid">
-            <label>同任务基准轮数 N: <strong id="lblSimTurns">60</strong>
-              <input type="range" id="simTurns" min="8" max="400" value="60" />
-            </label>
-            <label>主模型档位费率: <strong id="lblSimModel">1.0x (均衡High)</strong>
-              <select id="simModel">
-                <option value="2.0">2.0x (顶配 Neon-XHigh / Opus)</option>
-                <option value="1.35">1.35x (旗舰 Sonnet / GPT-High)</option>
-                <option value="1.0" selected>1.0x (均衡 Carbon-High / R1)</option>
-                <option value="0.65">0.65x (DSH 标准档)</option>
-                <option value="0.28">0.28x (轻量 Hydrogen / Flash)</option>
-              </select>
-            </label>
-            <label>单轮并行工具数: <strong id="lblSimTools">3.0</strong>
-              <input type="range" id="simTools" min="1" max="8" step="0.5" value="3.0" />
-            </label>
-            <label>平均上下文水位 (k): <strong id="lblSimCtx">65k</strong>
-              <input type="range" id="simCtx" min="20" max="220" step="5" value="65" />
-            </label>
-            <label>并发子代理数量: <strong id="lblSimSubs">0</strong>
-              <input type="range" id="simSubs" min="0" max="30" step="1" value="0" />
-            </label>
-            <label>子代理模型与复读模式:
-              <select id="simSubMode">
-                <option value="0.28|0">轻量 Flash (0.28x) + 只回摘要不重读原文</option>
-                <option value="2.0|1">顶配 Inherit (2.0x) + 主会话重复读原图/原文</option>
-              </select>
-            </label>
+        <div class="surface-block">
+          <div class="section-head">
+            <h2>事前策略防坑模拟器（对比同任务标准均衡基线）</h2>
+            <p>在启动大规模并发子代理或切换顶配模型前，基于当前实时拟合参数预演省时率与额度耗用率变化：</p>
           </div>
-          <div id="simResultBar" class="sim-result"></div>
+          <div class="sim-controls-grid">
+            <div class="slider-field">
+              <div class="slider-top"><span>预计基准轮数</span><strong id="lblSimTurns">60 轮</strong></div>
+              <input type="range" id="simTurns" min="8" max="400" value="60" />
+            </div>
+            <div class="slider-field">
+              <div class="slider-top"><span>主模型费率档位</span><strong id="lblSimModel">1.0x</strong></div>
+              <select id="simModel">
+                <option value="2.0">2.0x — 顶配 (Neon-XHigh / Opus)</option>
+                <option value="1.35">1.35x — 旗舰 (Sonnet / GPT-High)</option>
+                <option value="1.0" selected>1.0x — 均衡 (Carbon-High / R1)</option>
+                <option value="0.65">0.65x — DSH 标准档</option>
+                <option value="0.28">0.28x — 轻量 (Hydrogen / Flash)</option>
+              </select>
+            </div>
+            <div class="slider-field">
+              <div class="slider-top"><span>单轮并行工具数</span><strong id="lblSimTools">3.0</strong></div>
+              <input type="range" id="simTools" min="1" max="8" step="0.5" value="3.0" />
+            </div>
+            <div class="slider-field">
+              <div class="slider-top"><span>平均上下文水位</span><strong id="lblSimCtx">65k</strong></div>
+              <input type="range" id="simCtx" min="20" max="220" step="5" value="65" />
+            </div>
+            <div class="slider-field">
+              <div class="slider-top"><span>并发子代理数量</span><strong id="lblSimSubs">0 个</strong></div>
+              <input type="range" id="simSubs" min="0" max="30" step="1" value="0" />
+            </div>
+            <div class="slider-field">
+              <div class="slider-top"><span>子代理模型与复读模式</span></div>
+              <select id="simSubMode">
+                <option value="0.28|0">轻量 Flash (0.28x) · 仅回摘要零复读</option>
+                <option value="2.0|1">顶配 Inherit (2.0x) · 主对话复读原图/原文</option>
+              </select>
+            </div>
+          </div>
+          <div id="simResultBar" class="ab-scorecard" style="margin-top:14px"></div>
         </div>
       </section>
 
-      <!-- TAB 5: 样本明细与人工打分 -->
-      <section id="tab-samples" class="panel">
-        <div class="box">
-          <div class="filter-row">
-            <h3>全机多 AI Agent 会话样本库 (Q_task 代表真正的任务完成质量；你可随时手改校准真值)</h3>
-            <input type="text" id="searchBox" placeholder="搜索任务关键词、工程目录、模型或会话ID..." />
+      <!-- TAB 5: 对话样本明细与质量校准 -->
+      <section id="tab-samples" class="view-panel">
+        <div class="surface-block">
+          <div class="section-head split">
+            <div>
+              <h2>全机对话样本库与任务完成质量校准</h2>
+              <p>主标题实时同步你在客户端设置的对话名称（点击 <code>#短编号</code> 可复制完整会话 ID；修改完成质量分将立即重训全局模型）。</p>
+            </div>
+            <div class="filter-bar">
+              <select id="roleFilter">
+                <option value="all">全部角色</option>
+                <option value="execution">执行任务</option>
+                <option value="advisor">优化顾问</option>
+                <option value="probe">微探针</option>
+              </select>
+              <input type="text" id="searchBox" class="search-input" placeholder="搜索对话名称、首句内容、目录或 #编号…" />
+            </div>
           </div>
-          <div class="table-scroll">
-            <table class="data-table" id="projectsTable">
+
+          <div class="table-container" style="max-height:540px">
+            <table class="clean-table" id="projectsTable">
               <thead>
                 <tr>
-                  <th>平台 / 角色 / ID</th>
-                  <th>任务摘要 &amp; 目标工程</th>
+                  <th style="min-width:280px">对话名称 &amp; 首句摘要</th>
+                  <th>平台 / 角色</th>
                   <th>主力模型</th>
-                  <th>轮数(主+子)</th>
-                  <th>耗时 T</th>
-                  <th>总额度 C</th>
-                  <th>额度耗用率</th>
-                  <th>任务完成质量 Q_task (手改即时重训)</th>
+                  <th class="num">轮数 (主+子)</th>
+                  <th class="num">耗时</th>
+                  <th class="num">总额度</th>
+                  <th class="num">耗用率</th>
+                  <th class="num" style="min-width:140px">完成质量 Q_task</th>
                 </tr>
               </thead>
               <tbody></tbody>

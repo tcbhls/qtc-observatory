@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * QTC Observatory v1.2.0 — 独立命令行与全天候无头守护进程管理入口
+ * QTC Observatory v1.3.0 — 独立命令行与全天候无头守护进程管理入口
  */
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,39 +23,26 @@ if (cmd === 'sync' || cmd === 'report') {
   const dash = computeObservatoryAnalytics(db, 'all');
 
   console.log('========================================================================');
-  console.log(' QTC 跨Agent实时监测与因果对照研究台 v1.2.0 — 耗用率守恒与完成质量快照');
+  console.log(' QTC 观测中心 v1.3.0 — 实时对话名称同步与受控因果对照快照');
   console.log('========================================================================');
-  console.log(`[增量采集] 扫描文件: ${syncRes.scanned_files} | 新增/更新会话: ${syncRes.updated_sessions} | 未变跳过: ${syncRes.skipped_unchanged} | 耗时: ${syncRes.elapsed_ms}ms`);
-  console.log(`[总样本池] 总收录会话: ${dash.kpis.total_sessions} 个 (根任务项目: ${dash.kpis.root_projects}, 子代理: ${dash.kpis.subagent_sessions}) | 总轮数: ${dash.kpis.total_turns}`);
-  console.log(`[受控对照] 已构建有效因果对照实验对: ${dash.kpis.paired_experiment_count} 组 | 其中不合算/质量失守: ${dash.kpis.sesame_alert_count} 组 (超额损耗 ${dash.kpis.total_estimated_waste_u}U)`);
+  console.log(`[增量采集] 扫描日志: ${syncRes.scanned_files} | 新增/改名/更新: ${syncRes.updated_sessions} | 耗时: ${syncRes.elapsed_ms}ms`);
+  console.log(`[总样本池] 总收录会话: ${dash.kpis.total_sessions} 个 (主对话: ${dash.kpis.root_projects}, 子代理: ${dash.kpis.subagent_sessions}) | 受控对照: ${dash.kpis.paired_experiment_count} 组`);
 
-  console.log('\n--- 1. 跨 AI Agent 平台样本与任务完成质量分布 ---');
-  for (const p of dash.platform_summary) {
-    console.log(
-      `  • ${p.platform.padEnd(14)} | 会话=${String(p.total_sessions).padStart(4)} (主${String(p.root_sessions).padStart(3)}+子${String(p.sub_sessions).padStart(3)}) | 完成质量均分=${String(p.avg_q).padStart(5)} | 平均耗用率=${String(p.avg_burn_uh).padStart(6)} U/h | 总额度=${String(p.weighted_cost_u).padStart(7)}U`
-    );
+  console.log('\n--- 1. 正在活跃对话脉搏 (实时显示最新对话名 + #短编号) ---');
+  for (const s of dash.live_active_sessions) {
+    const sh = (s.session_uid.split(':')[1] || s.session_uid).replace(/^session-/, '').slice(0, 8);
+    console.log(`  • [${s.platform}] 「${s.display_name}」 (#${sh}) | ${s.turns}轮 · Ctx=${s.ctx_k}k · ${s.cost_u}U · ${s.seconds_ago}s前`);
   }
 
-  const r1 = dash.regressions.power_law_cost_vs_turns;
-  const r2 = dash.regressions.linear_throughput;
-  const r3 = dash.regressions.quality_vs_turns;
-  const r4 = dash.regressions.turn_latency_vs_out;
-  const ec = dash.prescriptions.empirical_constants;
-  console.log('\n--- 2. 在线实时自修正数学模型 ---');
-  console.log(`  [① 幂律膨胀] ln(C_raw) = ${r1.intercept} + ${r1.slope} * ln(N)  (n=${r1.n}, R²=${r1.r2}) -> 轮数翻倍成本×${(2 ** r1.slope).toFixed(2)}`);
-  console.log(`  [② 线性吞吐] C_weight  = ${r2.intercept} + ${r2.slope} * (μ·N·L_M) (n=${r2.n}, R²=${r2.r2})`);
-  console.log(`  [③ 完成质量] Q_task    = ${r3.intercept} + (${r3.slope}) * ln(N_tree) (n=${r3.n}, R²=${r3.r2})`);
-  console.log(`  [④ 单步延迟] t_LLM     = ${r4.mult_beta[0]} + ${r4.mult_beta[1]}*Out_k + ${r4.mult_beta[2]}*Ctx_100k (n=${r4.n}步, R²=${r4.mult_r2})`);
-  console.log(`  [⑤ 耗用功率] C_dot(U/h)= ${ec.burn_formula_beta[0]} + ${ec.burn_formula_beta[1]}*μ + ${ec.burn_formula_beta[2]}*Ctx_100k + ${ec.burn_formula_beta[3]}*Sub/h (R²=${ec.burn_formula_r2})`);
-
-  console.log(`\n--- 3. 受控因果对照实验榜 (明确【实验组 A】对比【基线 B】：质量 ΔQ / 省时率 / 耗用率增幅 / 成本变化) ---`);
-  for (const cp of dash.counterfactual_pairs.slice(0, 10)) {
+  console.log(`\n--- 2. 受控因果对照实验榜 (前 8 组) ---`);
+  for (const cp of dash.counterfactual_pairs.slice(0, 8)) {
     const d = cp.deltas;
+    const sh = (cp.target.uid.split(':')[1] || cp.target.uid).replace(/^session-/, '').slice(0, 8);
     console.log(
-      `  [${cp.comparison_scope}] ${cp.base.uid.slice(0, 14)}\n` +
-      `     基线B: T=${cp.base.T_min}m, C=${cp.base.C_u}U, 耗用率=${cp.base.burn_uh}U/h, Q_task=${cp.base.Q_task}\n` +
-      `     实验A: T=${cp.target.T_min}m, C=${cp.target.C_u}U, 耗用率=${cp.target.burn_uh}U/h, Q_task=${cp.target.Q_task}\n` +
-      `     差分结论: ${cp.verdict_label} | 质量 ΔQ=${d.delta_Q >= 0 ? '+' : ''}${d.delta_Q} | 省时=${d.time_saved_pct}% | 耗用率=${d.burn_surge_pct >= 0 ? '+' : ''}${d.burn_surge_pct}% (零溢价上限+${d.neutral_burn_limit_pct}%) | 单位成本=${d.cost_surge_pct >= 0 ? '+' : ''}${d.cost_surge_pct}%`
+      `  • 「${cp.display_name}」 (#${sh}) [${cp.comparison_scope}]\n` +
+      `     基线B (${cp.base.label}): T=${cp.base.T_min}m, C=${cp.base.C_u}U, 耗用率=${cp.base.burn_uh}U/h, Q=${cp.base.Q_task}\n` +
+      `     实验A (${cp.target.label}): T=${cp.target.T_min}m, C=${cp.target.C_u}U, 耗用率=${cp.target.burn_uh}U/h, Q=${cp.target.Q_task}\n` +
+      `     结论: ${cp.verdict_label} | ΔQ=${d.delta_Q >= 0 ? '+' : ''}${d.delta_Q} | 省时=${d.time_saved_pct}% | 耗用率=${d.burn_surge_pct >= 0 ? '+' : ''}${d.burn_surge_pct}% | 成本=${d.cost_surge_pct >= 0 ? '+' : ''}${d.cost_surge_pct}%`
     );
   }
 } else if (cmd === 'export') {

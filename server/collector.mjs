@@ -14,11 +14,151 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
 const HOME = homedir();
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const WIN_PATH_RE = /(?<![a-zA-Z0-9\\])[c-zC-Z]:\\(?:[^\\/:*?"<>|\r\n]+\\?){1,6}/g;
 const TOOL_TS_RE = /Created At:\s*(\S+)\s+Completed At:\s*(\S+)/;
+
+/**
+ * 解析 protobuf pbtxt 中的 title:"..." 字段（兼容原生 UTF-8 与八进制 \346\210\220 / 十六进制转义）
+ */
+function parsePbtxtTitle(buf) {
+  const rawStr = buf.toString('utf8');
+  const m = /title:\s*"((?:[^"\\]|\\.)*)"/.exec(rawStr);
+  if (!m) return '';
+  let inner = m[1];
+  if (/\\[0-7]{3}/.test(inner)) {
+    inner = inner.replace(/((?:\\[0-7]{3})+)/g, (seq) => {
+      const bytes = seq.split('\\').filter(Boolean).map((oct) => parseInt(oct, 8));
+      return Buffer.from(bytes).toString('utf8');
+    });
+  }
+  return inner.replace(/\\"/g, '"').replace(/\\n/g, ' ').replace(/\\\\/g, '\\').trim();
+}
+
+/**
+ * 毫秒级只读拉取全平台最新「用户自定义对话名称 / 侧栏实时标题」
+ * 优先级：用户手动重命名 (annotations/*.pbtxt | session_index.jsonl) > 客户端自动摘要标题 (conversation_summaries.db) > 首句提炼
+ */
+export function loadLiveExternalTitles() {
+  const titleMap = new Map(); // session_uid -> { displayName, parentUid, agentName, workspacePath }
+
+  // 1A. Antigravity conversation_summaries.db (只读非锁模式读取侧栏生成标题与子代理角色关系)
+  const csDbPath = join(HOME, '.gemini', 'antigravity', 'conversation_summaries.db');
+  if (existsSync(csDbPath)) {
+    let csDb = null;
+    try {
+      csDb = new DatabaseSync(csDbPath, { open: true, readOnly: true });
+      const rows = csDb.prepare(`
+        SELECT conversation_id, title, parent_conversation_id, agent_name, workspace_uris
+        FROM conversation_summaries
+      `).all();
+      for (const r of rows) {
+        if (!r.conversation_id) continue;
+        const uid = `agy:${String(r.conversation_id).toLowerCase()}`;
+        let wsPath = '';
+        if (r.workspace_uris) {
+          try {
+            const arr = JSON.parse(r.workspace_uris);
+            if (Array.isArray(arr) && arr[0]) {
+              wsPath = decodeURIComponent(String(arr[0]).replace(/^file:\/\/\/?/i, ''));
+            }
+          } catch {}
+        }
+        titleMap.set(uid, {
+          displayName: String(r.title || '').trim(),
+          parentUid: r.parent_conversation_id ? `agy:${String(r.parent_conversation_id).toLowerCase()}` : '',
+          agentName: String(r.agent_name || '').trim(),
+          workspacePath: wsPath,
+        });
+      }
+    } catch {
+      // 若宿主正在瞬间切库，静默跳过等下次心跳
+    } finally {
+      try { if (csDb) csDb.close(); } catch {}
+    }
+  }
+
+  // 1B. Antigravity annotations/*.pbtxt (最高优先级：用户手动修改后的最新实时对话名！)
+  const annDir = join(HOME, '.gemini', 'antigravity', 'annotations');
+  if (existsSync(annDir)) {
+    try {
+      for (const fn of readdirSync(annDir)) {
+        if (!fn.endsWith('.pbtxt')) continue;
+        const cid = fn.slice(0, -6).toLowerCase();
+        const uid = `agy:${cid}`;
+        const customTitle = parsePbtxtTitle(readFileSync(join(annDir, fn)));
+        if (customTitle) {
+          const prev = titleMap.get(uid) || { displayName: '', parentUid: '', agentName: '', workspacePath: '' };
+          prev.displayName = customTitle;
+          titleMap.set(uid, prev);
+        }
+      }
+    } catch {}
+  }
+
+  // 2. OpenAI Codex ~/.codex/session_index.jsonl (按行追加，最后一行即为最新改名！)
+  const codexIdxPath = join(HOME, '.codex', 'session_index.jsonl');
+  if (existsSync(codexIdxPath)) {
+    try {
+      const lines = readFileSync(codexIdxPath, 'utf8').split('\n').filter(Boolean);
+      for (const ln of lines) {
+        try {
+          const o = JSON.parse(ln);
+          if (o.id && o.thread_name) {
+            const uid = `codex:${String(o.id)}`;
+            const prev = titleMap.get(uid) || { displayName: '', parentUid: '', agentName: '', workspacePath: '' };
+            prev.displayName = String(o.thread_name).trim();
+            titleMap.set(uid, prev);
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // 3. Claude Code ~/.claude/sessions/*.json
+  const claudeSessDir = join(HOME, '.claude', 'sessions');
+  if (existsSync(claudeSessDir)) {
+    try {
+      for (const fn of readdirSync(claudeSessDir)) {
+        if (!fn.endsWith('.json')) continue;
+        try {
+          const o = JSON.parse(readFileSync(join(claudeSessDir, fn), 'utf8'));
+          const sid = o.sessionId || o.id || basename(fn, '.json');
+          const nm = o.title || o.name || o.customTitle || '';
+          if (sid && nm) {
+            titleMap.set(`claude:${sid}`, { displayName: String(nm).trim(), parentUid: '', agentName: '', workspacePath: o.cwd || '' });
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return titleMap;
+}
+
+/**
+ * 为缺乏独立客户端标题的会话自动提炼干净可读的短标题（去除路径引号与冗余前缀）
+ */
+function buildCleanFallbackName(rawPrompt = '', platform = '', shortId = '') {
+  let s = String(rawPrompt || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/Current runtime context\.[^]*$/i, '')
+    .replace(/\[IMAGE_COMMENT\][^\n]*/gi, '图片细节审校批注')
+    .replace(/[a-zA-Z]:\\[^\s"'，。；,;)）]+/g, (p) => {
+      const segs = p.split('\\').filter(Boolean);
+      return segs[segs.length - 1] || p;
+    })
+    .replace(/["'“”`]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s || s.startsWith('[')) {
+    const pName = platform === 'dsh' ? 'DSH 会话' : platform === 'codex' ? 'Codex 会话' : platform === 'claude-code' ? 'Claude 会话' : 'Agent 会话';
+    return `${pName} #${shortId}`;
+  }
+  return s.length > 32 ? `${s.slice(0, 32)}…` : s;
+}
 
 // ============================================================================
 // 任务完成质量 (Task Completion Quality, Q_task) 语义与验收证据正则
@@ -260,6 +400,7 @@ export function openObservatoryDb(dataDir) {
       started_at REAL DEFAULT 0,
       ended_at REAL DEFAULT 0,
       cwd TEXT DEFAULT '',
+      display_name TEXT DEFAULT '',
       title TEXT DEFAULT '',
       user_turns INTEGER DEFAULT 0,
       neg_feedback_turns INTEGER DEFAULT 0,
@@ -337,6 +478,7 @@ export function openObservatoryDb(dataDir) {
   if (!cols.has('session_role')) db.exec("ALTER TABLE sessions ADD COLUMN session_role TEXT DEFAULT 'execution'");
   if (!cols.has('project_key')) db.exec("ALTER TABLE sessions ADD COLUMN project_key TEXT DEFAULT ''");
   if (!cols.has('linked_uids')) db.exec("ALTER TABLE sessions ADD COLUMN linked_uids TEXT DEFAULT '[]'");
+  if (!cols.has('display_name')) db.exec("ALTER TABLE sessions ADD COLUMN display_name TEXT DEFAULT ''");
 
   const curVer = db.prepare('PRAGMA user_version').get()?.user_version || 0;
   if (curVer < SCHEMA_VERSION) {
@@ -374,7 +516,10 @@ function finalizeCommonMetrics(rec, qTaskScore) {
   );
 
   rec.q_objective = qTaskScore;
-  rec.domain = classifyTaskDomain(rec.title, `${rec.cwd} ${rec.project_key}`, rec.image_reads);
+  rec.domain = classifyTaskDomain(`${rec.display_name || ''} ${rec.title || ''}`, `${rec.cwd} ${rec.project_key}`, rec.image_reads);
+  if (!rec.display_name) {
+    rec.display_name = buildCleanFallbackName(rec.title, rec.platform, rec.raw_id.slice(0, 8));
+  }
   if (!rec.session_role) rec.session_role = 'execution';
   if (!rec.project_key) rec.project_key = '';
   if (!rec.linked_uids) rec.linked_uids = '[]';
@@ -833,7 +978,8 @@ function parseDshFile(filePath) {
       else if (Number(o.delegationDepth || 0) > 0) isSub = 1;
     } else if (tp === 'model/selection' || tp === 'request/context') {
       if (d.model) modelName = `${d.provider ? d.provider + '/' : ''}${d.model}`;
-    } else if (tp === 'session/title' && d.title && !title) {
+    } else if (tp === 'session/title' && d.title) {
+      // 不设 !title 限制：用户在 DSH 中每次重命名都会追加新的 session/title 事件，取最新一次！
       title = String(d.title).slice(0, 140);
     } else if (tp.includes('compaction') || tp.includes('summary/replace')) {
       compactions++;
@@ -1392,14 +1538,14 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
   const upsertSess = db.prepare(`
     INSERT INTO sessions (
       session_uid, platform, raw_id, parent_uid, is_subagent, session_role, project_key, linked_uids,
-      domain, primary_model, model_tier, model_mult, started_at, ended_at, cwd, title,
+      domain, primary_model, model_tier, model_mult, started_at, ended_at, cwd, display_name, title,
       user_turns, neg_feedback_turns, planner_turns, tool_calls, single_tool_turns,
       cmd_total, cmd_failed, file_edits, image_reads, compactions, input_tokens, cache_read_tokens, output_tokens,
       mean_ctx_k, max_ctx_k, token_accuracy, raw_cost_units, weighted_cost_units, cache_tax_share,
       llm_infer_sec, sync_tool_sec, bg_wait_sec, exec_time_min, workload_score, q_objective, source_path, sub_ref_ids
     ) VALUES (
       $session_uid, $platform, $raw_id, $parent_uid, $is_subagent, $session_role, $project_key, $linked_uids,
-      $domain, $primary_model, $model_tier, $model_mult, $started_at, $ended_at, $cwd, $title,
+      $domain, $primary_model, $model_tier, $model_mult, $started_at, $ended_at, $cwd, $display_name, $title,
       $user_turns, $neg_feedback_turns, $planner_turns, $tool_calls, $single_tool_turns,
       $cmd_total, $cmd_failed, $file_edits, $image_reads, $compactions, $input_tokens, $cache_read_tokens, $output_tokens,
       $mean_ctx_k, $max_ctx_k, $token_accuracy, $raw_cost_units, $weighted_cost_units, $cache_tax_share,
@@ -1408,7 +1554,7 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
       parent_uid = CASE WHEN excluded.parent_uid != '' THEN excluded.parent_uid ELSE sessions.parent_uid END,
       is_subagent = MAX(sessions.is_subagent, excluded.is_subagent),
       session_role = CASE WHEN MAX(sessions.is_subagent, excluded.is_subagent) = 1 THEN 'subagent' ELSE excluded.session_role END,
-      project_key = excluded.project_key,
+      project_key = CASE WHEN excluded.project_key != '' THEN excluded.project_key ELSE sessions.project_key END,
       linked_uids = excluded.linked_uids,
       domain = excluded.domain,
       primary_model = excluded.primary_model,
@@ -1416,6 +1562,7 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
       model_mult = excluded.model_mult,
       started_at = excluded.started_at,
       ended_at = excluded.ended_at,
+      display_name = excluded.display_name,
       title = excluded.title,
       user_turns = excluded.user_turns,
       neg_feedback_turns = excluded.neg_feedback_turns,
@@ -1545,6 +1692,45 @@ export function syncAllAgentSources(db, dataDir, forceFull = false) {
       try { refs = JSON.parse(r.sub_ref_ids); } catch {}
       for (const childUid of refs) markChild.run(r.session_uid, childUid);
     }
+
+    // 实时对齐全平台外部对话标题与用户手动重命名（即使 transcript.jsonl 未新增字节，改名也会在毫秒内立刻生效！）
+    const extTitles = loadLiveExternalTitles();
+    const allDbSess = db.prepare('SELECT session_uid, platform, raw_id, is_subagent, parent_uid, project_key, display_name, title FROM sessions').all();
+    const updateNameStmt = db.prepare("UPDATE sessions SET display_name = ?, parent_uid = CASE WHEN ? != '' THEN ? ELSE parent_uid END, project_key = CASE WHEN project_key = '' AND ? != '' THEN ? ELSE project_key END WHERE session_uid = ?");
+
+    // 第一遍：先更新所有主会话标题与外部父子关系
+    const latestNameByUid = new Map();
+    for (const s of allDbSess) {
+      const ext = extTitles.get(s.session_uid);
+      let nextName = s.display_name || buildCleanFallbackName(s.title, s.platform, s.raw_id.slice(0, 8));
+      let nextParent = s.parent_uid || '';
+      let nextProj = '';
+      if (ext) {
+        if (ext.displayName) nextName = ext.displayName;
+        if (ext.parentUid && !nextParent) nextParent = ext.parentUid;
+        if (ext.workspacePath && !s.project_key) nextProj = normalizeProjectKey(ext.workspacePath, []);
+      }
+      latestNameByUid.set(s.session_uid, nextName);
+      if (nextName !== s.display_name || (nextParent && nextParent !== s.parent_uid) || nextProj) {
+        updateNameStmt.run(nextName, nextParent, nextParent, nextProj, nextProj, s.session_uid);
+        updated++;
+      }
+    }
+
+    // 第二遍：为子代理补充直观归属名称（如「[子代理 · research] 归属：Local AI Manga Image Generation」）
+    const subRows = db.prepare('SELECT session_uid, raw_id, parent_uid, display_name FROM sessions WHERE is_subagent = 1').all();
+    const updSubName = db.prepare('UPDATE sessions SET display_name = ? WHERE session_uid = ?');
+    for (const sr of subRows) {
+      const ext = extTitles.get(sr.session_uid);
+      const roleTag = ext?.agentName ? `子代理·${ext.agentName}` : '子代理';
+      const pName = sr.parent_uid ? latestNameByUid.get(sr.parent_uid) : '';
+      const desired = pName ? `[${roleTag}] ${pName}` : (ext?.displayName || `[${roleTag}] #${sr.raw_id.slice(0, 8)}`);
+      if (desired !== sr.display_name) {
+        updSubName.run(desired, sr.session_uid);
+        updated++;
+      }
+    }
+
     db.exec('COMMIT');
   } catch (err) {
     db.exec('ROLLBACK');

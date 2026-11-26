@@ -1,6 +1,8 @@
-# QTC Observatory v1.2 — 跨 AI Agent 零干扰实时任务监测与因果对照研究台
+# QTC Observatory v1.3 — 跨 AI Agent 零干扰实时任务监测与因果对照中心
 
 **QTC Observatory** 是一款遵循 **100% 物理级零干扰原则（Zero-Interference Principle）** 的跨平台 AI Agent 实时遥测监测与因果计量分析工具（支持作为 **Google Antigravity 原生 MCP App 插件**运行，亦可作为 **全天候无头守护进程 (`daemon`)、本地 SSE 实时 Web 大屏与 CLI** 运行）。
+
+v1.3 采用极简高密度界面规范全面重构视觉层级，并原生监听各客户端的**对话重命名与标题元数据**（`annotations/*.pbtxt`、`conversation_summaries.db`、`session_index.jsonl`、`session/title`），你在客户端修改对话名字后 **< 1 秒**即热推同步至全站所有看板、图表与下拉选择器。
 
 针对 AI Agent 任务优化中最核心的痛点——**“默认要求任务完成质量保持不变，上了加速/并发方案后时间没省多少，额度耗用率反而剧增（捡芝麻丢西瓜）”**，系统从第一性原理构建了**受控基线-实验因果差分框架**与**功率-速度微分守恒定律**。
 
